@@ -1,0 +1,7 @@
+PyQt6==6.6.1
+requests==2.31.0
+beautifulsoup4==4.12.3
+llama-cpp-python==0.2.55
+sentence-transformers==2.5.1
+matplotlib==3.8.4
+pyinstaller==6.4.0

@@ -1,0 +1,25 @@
+# 虚拟环境
+venv310/
+.venv/
+
+# Python缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# VS Code配置
+.vscode/
+
+# 数据库文件（后面用到再同步，现在先忽略）
+*.db
+*.sqlite3
+
+# 打包生成的文件
+dist/
+build/
+*.exe
+*.spec
+
+# 日志文件
+*.log
