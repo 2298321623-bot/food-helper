@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import *
-from PyQt6.QtCore import QRunnable, QObject, pyqtSignal, Qt, QDate
+from PyQt6.QtCore import QRunnable, QObject, pyqtSignal, Qt, QDate, QThreadPool
 from PyQt6.QtGui import QFont, QColor # 1. 必须引入 QColor
 import csv
 from datetime import datetime
@@ -49,6 +49,7 @@ class MainWindow(QTabWidget):
         self.init_recipe_tab()
         self.init_shop_tab()
         self.init_knowledge_tab()
+        self.thread_pool = QThreadPool.globalInstance()
 
     def init_window(self):
         self.setObjectName("mainWindow")
@@ -268,13 +269,21 @@ class MainWindow(QTabWidget):
         btn_generate.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_generate.clicked.connect(self.generate_recipe_list)
 
+        self.btn_ai_recipe = QPushButton("✨ AI 生成详细步骤")
+        self.btn_ai_recipe.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_ai_recipe.clicked.connect(self.start_ai_recipe_generation)
+
         form_layout = QFormLayout()
         form_layout.setSpacing(10)
         form_layout.addRow("生成模式：", self.mode_box)
         form_layout.addRow("饮食偏好：", self.diet_box)
         form_layout.addRow("烹饪时间：", self.time_box)
         form_layout.addRow("难度级别：", self.diff_box)
-        form_layout.addRow("", btn_generate)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(btn_generate)
+        btn_row.addWidget(self.btn_ai_recipe)
+        btn_row.addStretch()
+        form_layout.addRow("", btn_row)
 
         group = QGroupBox("个性化食谱筛选")
         group.setLayout(form_layout)
@@ -315,40 +324,142 @@ class MainWindow(QTabWidget):
         diet = self.diet_box.currentText()
         time = self.time_box.currentText()
         diff = self.diff_box.currentText()
-        ingredient_names = {item["name"] for item in self.ingredients}
+        ingredient_names = [item["name"] for item in self.ingredients]
         results = []
 
-        if mode == "用现有食材做":
-            for recipe in self.recipes:
-                if set(recipe["ingredients"]).issubset(ingredient_names):
-                    results.append(recipe)
-            if not results:
-                results = [r for r in self.recipes if diet in r["tags"] and r["time"] == time and r["diff"] == diff]
-        else:
-            results = [r for r in self.recipes if diet in r["tags"] and r["time"] == time and r["diff"] == diff]
+        try:
+            from services.recipe_service import get_recipe_service
+
+            svc = get_recipe_service()
+            if mode == "用现有食材做":
+                if not ingredient_names:
+                    QMessageBox.information(
+                        self, "提示", "请先在「食材管理」中添加冰箱食材。"
+                    )
+                else:
+                    results = svc.search_by_ingredients(
+                        ingredient_names, top_k=10, min_score=0.12
+                    )
+            else:
+                results = svc.search_by_preferences(
+                    diet=diet, cooking_time=time, difficulty=diff, top_k=10
+                )
+        except Exception:
+            ingredient_set = set(ingredient_names)
+            if mode == "用现有食材做":
+                for recipe in self.recipes:
+                    if set(recipe["ingredients"]).issubset(ingredient_set):
+                        results.append(recipe)
+            else:
+                results = [
+                    r
+                    for r in self.recipes
+                    if diet in r["tags"] and r["time"] == time and r["diff"] == diff
+                ]
 
         self.recipe_list.clear()
         if results:
             for recipe in results:
-                item = QListWidgetItem(recipe["name"])
+                label = recipe["name"]
+                if recipe.get("match_score") is not None:
+                    label = f"{label}  ({recipe['match_score']:.0%})"
+                item = QListWidgetItem(label)
                 item.setData(Qt.ItemDataRole.UserRole, recipe)
                 self.recipe_list.addItem(item)
             self.recipe_detail.clear()
+            self.recipe_list.setCurrentRow(0)
+            self.show_recipe_detail(self.recipe_list.item(0))
         else:
-            self.recipe_list.addItem("⚠️ 未找到完全匹配食谱，请尝试调宽筛选条件")
+            self.recipe_list.addItem("⚠️ 未找到匹配食谱，请调整食材或筛选条件")
             self.recipe_detail.clear()
+
+    def start_ai_recipe_generation(self):
+        ingredient_names = [item["name"] for item in self.ingredients]
+        if not ingredient_names:
+            QMessageBox.information(self, "提示", "请先在「食材管理」中添加食材。")
+            return
+
+        current = self.recipe_list.currentItem()
+        recipe = current.data(Qt.ItemDataRole.UserRole) if current else None
+        recipe_name = (recipe or {}).get("name", "")
+        diet = self.diet_box.currentText()
+        time = self.time_box.currentText()
+        diff = self.diff_box.currentText()
+
+        self.btn_ai_recipe.setEnabled(False)
+        self.recipe_detail.setPlainText("⏳ AI 正在生成详细菜谱，请稍候…")
+
+        from services.recipe_service import get_recipe_service
+
+        svc = get_recipe_service()
+
+        def task():
+            return svc.generate_recipe_text(
+                ingredient_names,
+                recipe_name=recipe_name,
+                diet=diet,
+                cooking_time=time,
+                difficulty=diff,
+            )
+
+        worker = Worker(task)
+        worker.signals.result.connect(self._on_ai_recipe_ready)
+        worker.signals.error.connect(self._on_ai_recipe_error)
+        worker.signals.finished.connect(lambda: self.btn_ai_recipe.setEnabled(True))
+        self.thread_pool.start(worker)
+
+    def _on_ai_recipe_ready(self, text):
+        html = (
+            "<h2 style='color:#27ae60;'>✨ AI 生成菜谱</h2>"
+            f"<pre style='white-space:pre-wrap; font-family:Microsoft YaHei, sans-serif;"
+            f" line-height:1.7; color:#333;'>{self._escape_html(text)}</pre>"
+        )
+        self.recipe_detail.setHtml(html)
+
+    def _on_ai_recipe_error(self, message):
+        self.recipe_detail.setPlainText(f"生成失败：{message}\n\n请确认已下载本地模型或配置 DEEPSEEK_API_KEY。")
+
+    @staticmethod
+    def _escape_html(text: str) -> str:
+        return (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
 
     def show_recipe_detail(self, item):
         recipe = item.data(Qt.ItemDataRole.UserRole)
         if recipe:
-            ingredients = "、".join(recipe["ingredients"])
+            ingredients = "、".join(recipe.get("ingredients", []))
+            score_line = ""
+            if recipe.get("match_score") is not None:
+                score_line = f"<p><b>匹配度：</b>{recipe['match_score']:.0%}</p>"
+            missing = recipe.get("missing_ingredients") or []
+            missing_line = ""
+            if missing:
+                missing_line = (
+                    f"<p style='color:#c0392b;'><b>还缺食材：</b>"
+                    f"{'、'.join(missing)}</p>"
+                )
+            steps = recipe.get("steps") or []
+            steps_html = ""
+            if steps:
+                steps_html = "<ol>" + "".join(
+                    f"<li style='margin:4px 0;'>{s}</li>" for s in steps
+                ) + "</ol>"
+            else:
+                steps_html = (
+                    f"<p style='line-height:1.8; color:#555555;'>{recipe.get('description', '')}</p>"
+                )
             self.recipe_detail.setHtml(
                 f"<h2 style='color:#27ae60;'>🍳 {recipe['name']}</h2>"
-                f"<p><b>推荐标签：</b><span style='color:#e67e22;'>{','.join(recipe['tags'])}</span> | "
-                f"<b>烹饪时间：</b>{recipe['time']} | <b>难度：</b>{recipe['diff']}</p>"
+                f"<p><b>推荐标签：</b><span style='color:#e67e22;'>{','.join(recipe.get('tags', []))}</span> | "
+                f"<b>烹饪时间：</b>{recipe.get('time', '')} | <b>难度：</b>{recipe.get('diff', '')}</p>"
+                f"{score_line}{missing_line}"
                 f"<hr style='border:none; border-top:1px solid #E4E7ED;'>"
                 f"<h3>🛒 所需食材：</h3><p style='line-height:1.6;'>{ingredients}</p>"
-                f"<h3>📝 详细烹饪步骤：</h3><p style='line-height:1.8; color:#555555;'>{recipe['description']}</p>"
+                f"<h3>📝 烹饪步骤：</h3>{steps_html}"
+                f"<p style='color:#888; font-size:12px;'>点击「AI 生成详细步骤」可获取完整用量与技巧。</p>"
             )
 
     # (购物清单与饮食知识库选项卡直接复用精细化间距规则...)

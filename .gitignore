@@ -23,3 +23,14 @@ build/
 
 # 日志文件
 *.log
+
+# AI 模型（体积大，本地下载）
+models/
+*.gguf
+
+# HuggingFace / 嵌入模型缓存
+.cache/
+huggingface/
+
+# API 密钥
+.env
