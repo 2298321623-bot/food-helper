@@ -1,6 +1,7 @@
 import os
 import json
 import sqlite3
+import numpy as np
 from datetime import datetime
 
 DB_FILE = "food.db"
@@ -17,6 +18,14 @@ def to_json(data):
 
 def to_list(json_str):
     return json.loads(json_str) if json_str else []
+
+# 向量转字节（存入SQLite）
+def serialize_embedding(embedding):
+    return np.array(embedding, dtype=np.float32).tobytes()
+
+# 字节转回向量（读取用，Day10用）
+def deserialize_embedding(blob):
+    return np.frombuffer(blob, dtype=np.float32)
 
 def init_database():
     """创建所有表"""
@@ -60,6 +69,9 @@ def init_database():
                    difficulty INTEGER,
                    tags TEXT,
                    nutrition TEXT,
+                   embedding BLOB,  -- 新增：存储向量
+                   user_id INTEGER,
+                   FOREIGN KEY (user_id) REFERENCES users(id)
                    source TEXT
                    ) ''')
     
@@ -81,12 +93,52 @@ def init_database():
                    recipe_id INTEGER NOT NULL,
                    create_time TEXT,
                    FOREIGN KEY (user_id) REFERENCES users(id),
-                   FOREIGN KEY (recipe_id) REFERENCES recipes(recipee_id)
+                   FOREIGN KEY (recipe_id) REFERENCES recipes(recipe_id)
                    )''')
     
     conn.commit()
     conn.close()
     print("✅ 全部数据表初始化完成")
+
+def import_recipes_with_embedding(json_path="data.json"):
+    # 1. 加载数据
+    with open(json_path, "r", encoding="utf-8") as f:
+        recipe_list = json.load(f)
+
+    # 2. 加载组员C的向量模型
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+
+    conn = connect_db()
+    c = conn.cursor()
+
+    for recipe in recipe_list:
+        name = recipe.get("name", "")
+        ingredients = recipe.get("ingredients", [])
+        # 构造用于生成向量的文本
+        text = name + " " + " ".join([str(i) for i in ingredients])
+
+        # 3. 调用向量化
+        embedding = model.encode(text)
+        emb_blob = serialize_embedding(embedding)
+
+        # 4. 插入数据库（带向量）
+        c.execute('''
+            INSERT INTO recipes
+            (name, ingredients, steps, cooking_time, difficulty, tags, nutrition, embedding, user_id)
+            VALUES (?,?,?,?,?,?,?,?,?)
+        ''', (
+            name,
+            to_json(ingredients),
+            to_json([]),
+            0, "", to_json([]), to_json({}),
+            emb_blob,
+            1
+        ))
+
+    conn.commit()
+    conn.close()
+    print("导入完成")
 
 #将data.json导入数据库
 def import_recipes_from_json():
@@ -275,8 +327,66 @@ def get_favorites(user_id):
 
 #删除喜欢
 
+#智能推荐算法
+# 计算余弦相似度（纯 numpy 实现）
+def cosine_similarity(a, b):
+    dot = np.dot(a, b)
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+    return dot / (norm_a * norm_b)
+
+# 推荐食谱（根据用户食材）
+def recommend_recipes(user_id=1, top_n=5):
+    conn = connect_db()
+    c = conn.cursor()
+
+    # 1. 获取用户食材
+    c.execute("SELECT name FROM ingredients WHERE user_id=?", (user_id,))
+    user_ingredients = [row[0] for row in c.fetchall()]
+
+    if not user_ingredients:
+        conn.close()
+        return []
+
+    # 2. 读取所有食谱
+    c.execute("SELECT recipe_id, name, ingredients, embedding FROM recipes WHERE embedding IS NOT NULL")
+    all_recipes = c.fetchall()
+    conn.close()
+
+    # 3. 生成用户食材的向量（简单统计向量）
+    all_ingredients = set()
+    for rec in all_recipes:
+        ings = json.loads(rec[2])
+        all_ingredients.update(ings)
+    all_ingredients = list(all_ingredients)
+
+    # 用户食材向量
+    user_vec = np.array([1.0 if ing in user_ingredients else 0.0 for ing in all_ingredients])
+
+    # 4. 计算相似度
+    result = []
+    for rec in all_recipes:
+        rec_id, name, ing_str, emb_blob = rec
+        rec_vec = np.frombuffer(emb_blob, dtype=np.float32)
+
+        # 相似度
+        score = cosine_similarity(user_vec, rec_vec)
+        result.append((score, name, json.loads(ing_str)))
+
+    # 5. 排序
+    result.sort(reverse=True)
+    return result[:top_n]
+
+# 展示推荐结果
+def show_recommend(user_id=1):
+    print("\n==== 🍲 智能食谱推荐（仅 Numpy） ====")
+    data = recommend_recipes(user_id)
+    for i, (score, name, ings) in enumerate(data, 1):
+        print(f"{i}. {name} | 匹配度：{score:.1%}")
+
+
 
 if __name__ == "__main__":
     init_database()
     import_recipes_from_json()  # 导入你的爬虫数据
-    
+    show_recommend(user_id=1, top_n=5)
