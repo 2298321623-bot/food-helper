@@ -409,10 +409,10 @@ class MainWindow(QTabWidget):
         self.thread_pool.start(worker)
 
     def _on_ai_recipe_ready(self, text):
+        escaped = self._escape_html(text)
         html = (
             "<h2 style='color:#27ae60;'>✨ AI 生成菜谱</h2>"
-            f"<pre style='white-space:pre-wrap; font-family:Microsoft YaHei, sans-serif;"
-            f" line-height:1.7; color:#333;'>{self._escape_html(text)}</pre>"
+            f"<pre style='white-space:pre-wrap; font-family:Microsoft YaHei, sans-serif; line-height:1.7; color:#333;'>{escaped}</pre>"
         )
         self.recipe_detail.setHtml(html)
 
