@@ -7,7 +7,7 @@ from typing import List, Optional
 
 from llm.base_llm import BaseLLM
 from llm.cloud_llm import CloudLLM
-from llm.local_llm import LocalLLM
+from llm.local_llm import LocalLLM, local_llm_unavailable_reason
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +24,16 @@ def get_llm(prefer_local: bool = True) -> BaseLLM:
         return cloud
     if local.is_available():
         return local
+    hints = []
+    local_reason = local_llm_unavailable_reason()
+    if local_reason:
+        hints.append(local_reason)
+    if not cloud.is_available():
+        hints.append("未配置云端：请设置环境变量 DEEPSEEK_API_KEY")
     raise RuntimeError(
-        "无可用大模型：请下载本地 GGUF（scripts/download_qwen_model.py）"
-        "或设置环境变量 DEEPSEEK_API_KEY"
+        "无可用大模型：\n" + "\n".join(hints)
+        if hints
+        else "请下载本地 GGUF 或配置 DEEPSEEK_API_KEY"
     )
 
 
@@ -50,8 +57,16 @@ def generate_recipe_with_fallback(
         order.append(local)
 
     if not order:
+        hints = []
+        local_reason = local_llm_unavailable_reason()
+        if local_reason:
+            hints.append(local_reason)
+        if not cloud.is_available():
+            hints.append("未配置云端：请设置环境变量 DEEPSEEK_API_KEY")
         raise RuntimeError(
-            "无可用大模型：请下载本地 GGUF 或配置 DEEPSEEK_API_KEY"
+            "无可用大模型：\n" + "\n".join(hints)
+            if hints
+            else "请下载本地 GGUF 或配置 DEEPSEEK_API_KEY"
         )
 
     for llm in order:

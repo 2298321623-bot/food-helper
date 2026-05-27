@@ -264,6 +264,7 @@ class RecipeRetriever:
         self.recipes = recipes or []
         self.embedding_service = embedding_service or EmbeddingService()
         self._embeddings_ready = False
+        self._embedding_failed_reason = ""
 
     @classmethod
     def from_json(cls, path: Path = SAMPLE_RECIPES_JSON) -> "RecipeRetriever":
@@ -272,14 +273,27 @@ class RecipeRetriever:
             data = json.load(f)
         recipes = data if isinstance(data, list) else data.get("recipes", [])
         retriever = cls(recipes=recipes)
-        retriever.build_embeddings()
+        retriever._try_build_embeddings()
         return retriever
 
     def load_recipes(self, recipes: List[Dict[str, Any]], rebuild_embeddings: bool = True):
         self.recipes = recipes
         self._embeddings_ready = False
+        self._embedding_failed_reason = ""
         if rebuild_embeddings:
+            self._try_build_embeddings()
+
+    def _try_build_embeddings(self):
+        """尽力构建向量；失败时自动降级为仅食材/偏好匹配，不中断主流程。"""
+        if self._embeddings_ready or not self.recipes:
+            return
+        try:
             self.build_embeddings()
+            self._embedding_failed_reason = ""
+        except Exception as e:
+            self._embeddings_ready = False
+            self._embedding_failed_reason = str(e)
+            logger.warning("向量检索不可用，降级为规则匹配：%s", e)
 
     def build_embeddings(self):
         """为菜谱预计算向量（可写入 DB BLOB）。"""
@@ -302,12 +316,12 @@ class RecipeRetriever:
     ) -> List[Dict[str, Any]]:
         """对外主接口：根据食材名称列表检索菜谱。"""
         if not self._embeddings_ready and self.recipes:
-            self.build_embeddings()
+            self._try_build_embeddings()
         return match_recipes_by_ingredients(
             self.recipes,
             ingredient_names,
             top_k=top_k,
-            embedding_service=self.embedding_service,
+            embedding_service=self.embedding_service if self._embeddings_ready else None,
             min_score=min_score,
         )
 
@@ -329,13 +343,13 @@ class RecipeRetriever:
     ) -> List[Dict[str, Any]]:
         """Week2：按需求做菜检索。"""
         if not self._embeddings_ready and self.recipes:
-            self.build_embeddings()
+            self._try_build_embeddings()
         return match_recipes_by_preferences(
             self.recipes,
             diet=diet,
             cooking_time=cooking_time,
             difficulty=difficulty,
             top_k=top_k,
-            embedding_service=self.embedding_service,
+            embedding_service=self.embedding_service if self._embeddings_ready else None,
             min_score=min_score,
         )
