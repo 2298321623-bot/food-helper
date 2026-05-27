@@ -23,6 +23,8 @@ build/
 
 # 日志文件
 *.log
+stderr.txt
+debug-*.log
 
 # AI 模型（体积大，本地下载）
 models/
