@@ -43,3 +43,14 @@ DEEPSEEK_API_BASE = os.environ.get(
     "DEEPSEEK_API_BASE", "https://api.deepseek.com/v1"
 )
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+
+# 食材录入单位下拉选项
+INGREDIENT_UNITS = [
+    "个", "只", "根", "片", "条", "份",
+    "克", "千克", "斤", "两",
+    "毫升", "升",
+    "包", "袋", "盒", "瓶", "罐",
+]
+
+# 「我已做完」可选几人份
+SERVING_OPTIONS = [1, 2, 3, 4, 6]

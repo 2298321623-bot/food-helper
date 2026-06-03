@@ -2,7 +2,8 @@ PyQt6==6.6.1
 PyQt6-Qt6==6.6.1
 requests==2.31.0
 beautifulsoup4==4.12.3
-llama-cpp-python==0.2.55
+# Windows/Python 3.12 需用预编译包，见 scripts/install_local_llm_deps.py
+llama-cpp-python>=0.2.55
 sentence-transformers==2.5.1
 matplotlib==3.8.4
 pyinstaller==6.4.0

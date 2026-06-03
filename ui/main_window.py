@@ -1,8 +1,19 @@
 from PyQt6.QtWidgets import *
 from PyQt6.QtCore import QRunnable, QObject, pyqtSignal, Qt, QDate, QThreadPool
-from PyQt6.QtGui import QFont, QColor # 1. 必须引入 QColor
+from PyQt6.QtGui import QColor
 import csv
 from datetime import datetime
+
+from config import INGREDIENT_UNITS, SERVING_OPTIONS
+from services.inventory_service import (
+    DeductionRow,
+    apply_deductions,
+    format_amount_display,
+    normalize_pantry_item,
+    parse_amount_text,
+    plan_deductions,
+    recipe_ingredients_from_dict,
+)
 
 # (WorkerSignals 与 Worker 类保持原样不变...)
 class WorkerSignals(QObject):
@@ -31,6 +42,7 @@ class MainWindow(QTabWidget):
         super().__init__()
         self.ingredients = []
         self.shopping_items = []
+        self._active_recipe_for_cooking = None
         self.recipes = [
             {"name": "番茄炒蛋", "tags": ["家常菜"], "time": "15分钟内", "diff": "简单", "ingredients": ["鸡蛋", "番茄"], "description": "用番茄和鸡蛋快速炒制，口感酸甜，营养丰富。"},
             {"name": "蒜蓉虾仁", "tags": ["家常菜", "增肌餐"], "time": "15-30分钟", "diff": "中等", "ingredients": ["虾仁", "蒜"], "description": "鲜嫩虾仁搭配蒜蓉，适合轻松下厨。"},
@@ -49,38 +61,92 @@ class MainWindow(QTabWidget):
         self.init_recipe_tab()
         self.init_shop_tab()
         self.init_knowledge_tab()
+        self.init_stats_tab()
+        self.currentChanged.connect(self._on_main_tab_changed)
         self.thread_pool = QThreadPool.globalInstance()
+        self._refresh_llm_status_label()
 
     def init_window(self):
         self.setObjectName("mainWindow")
         self.setWindowTitle("家庭食材管理与智能食谱助手")
-        self.setFixedSize(1050, 700) # 黄金展现尺寸
+        self.setMinimumSize(1080, 720)
+        self.resize(1120, 760)
+        self.tabBar().setDocumentMode(True)
+        self.tabBar().setDrawBase(False)
+
+    def _on_main_tab_changed(self, index: int):
+        if 0 <= index < self.count() and self.widget(index) is self.recipe_tab:
+            if self.mode_box.currentText() == "用现有食材做":
+                self._refresh_ingredient_picker()
+
+    def _on_recipe_mode_changed(self, mode: str):
+        use_pantry = mode == "用现有食材做"
+        self.ingredient_pick_widget.setVisible(use_pantry)
+        if use_pantry:
+            self._refresh_ingredient_picker()
+
+    def _refresh_ingredient_picker(self):
+        if not hasattr(self, "ingredient_pick_list"):
+            return
+        self.ingredient_pick_list.clear()
+        for raw in self.ingredients:
+            item = normalize_pantry_item(dict(raw))
+            label = f"{item['name']}（{format_amount_display(item.get('amount', 1), item.get('unit', '个'))}）"
+            list_item = QListWidgetItem(label)
+            list_item.setFlags(
+                Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled
+            )
+            list_item.setCheckState(Qt.CheckState.Checked)
+            list_item.setData(Qt.ItemDataRole.UserRole, item["name"])
+            self.ingredient_pick_list.addItem(list_item)
+
+    def _get_checked_ingredient_names(self) -> list:
+        if not hasattr(self, "ingredient_pick_list"):
+            return [item["name"] for item in self.ingredients]
+        names = []
+        for i in range(self.ingredient_pick_list.count()):
+            list_item = self.ingredient_pick_list.item(i)
+            if list_item.checkState() == Qt.CheckState.Checked:
+                name = list_item.data(Qt.ItemDataRole.UserRole)
+                if name:
+                    names.append(name)
+        return names
+
+    def _ingredient_names_for_recipe(self) -> list:
+        if self.mode_box.currentText() == "用现有食材做":
+            return self._get_checked_ingredient_names()
+        return [item["name"] for item in self.ingredients]
 
     def init_ingredient_tab(self):
         self.ingredient_tab = QWidget()
         self.ingredient_table = QTableWidget()
         self.ingredient_table.setColumnCount(6)
-        self.ingredient_table.setHorizontalHeaderLabels(["食材名称", "数量/单位", "保质期", "食材分类", "存放位置", "操作"])
+        self.ingredient_table.setHorizontalHeaderLabels(
+            ["食材名称", "数量/单位", "保质期", "食材分类", "存放位置", "操作"]
+        )
         
         # 2. 表格高级打磨
         self.ingredient_table.setShowGrid(False)
         self.ingredient_table.setAlternatingRowColors(True)
         self.ingredient_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.ingredient_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows) # 允许整行选中
-        self.ingredient_table.verticalHeader().setDefaultSectionSize(44) # 设置宽裕的现代行高
+        self.ingredient_table.verticalHeader().setDefaultSectionSize(40)
         self.ingredient_table.verticalHeader().setVisible(False) # 隐藏极其刺眼的左侧原生数字行号
         header = self.ingredient_table.horizontalHeader()
         header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
         for col in range(5):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        self.ingredient_table.setColumnWidth(5, 128)
 
-        self.btn_add_ingredient = QPushButton("➕ 添加食材")
+        self.btn_add_ingredient = QPushButton("添加食材")
         self.btn_add_ingredient.setObjectName("primaryBtn") # 赋予主操作绿色
         self.btn_add_ingredient.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_add_ingredient.clicked.connect(self.show_add_ingredient_dialog)
-        
-        self.btn_remove_ingredient = QPushButton("🗑 删除选中")
+        self.btn_add_ingredient.clicked.connect(
+            lambda _checked=False: self.show_add_ingredient_dialog()
+        )
+
+        self.btn_remove_ingredient = QPushButton("删除选中")
         self.btn_remove_ingredient.setObjectName("dangerBtn") # 赋予危险操作淡红
         self.btn_remove_ingredient.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_remove_ingredient.clicked.connect(self.remove_selected_ingredient)
@@ -90,28 +156,50 @@ class MainWindow(QTabWidget):
         btn_layout.addWidget(self.btn_remove_ingredient)
         btn_layout.addStretch()
 
-        title_label = QLabel("✨ 食材管理中心")
-        title_label.setStyleSheet("font-size:16px; font-weight:700; color:#1d6b43; margin-bottom:10px;")
-        title_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        title_label = QLabel("食材管理中心")
+        title_label.setObjectName("pageTitle")
+        subtitle = QLabel("管理冰箱库存，关注保质期提醒")
+        subtitle.setObjectName("pageSubtitle")
+
+        table_card = QFrame()
+        table_card.setObjectName("contentCard")
+        table_card_layout = QVBoxLayout(table_card)
+        table_card_layout.setContentsMargins(12, 12, 16, 12)
+        table_card_layout.addWidget(self.ingredient_table)
 
         layout = QVBoxLayout()
-        layout.setContentsMargins(15, 15, 15, 15) # 设置合理的内边距
+        layout.setContentsMargins(20, 16, 20, 20)
+        layout.setSpacing(12)
         layout.addWidget(title_label)
+        layout.addWidget(subtitle)
         layout.addLayout(btn_layout)
-        layout.addSpacing(8)
-        layout.addWidget(self.ingredient_table)
+        layout.addWidget(table_card, 1)
         self.ingredient_tab.setLayout(layout)
         self.addTab(self.ingredient_tab, "食材管理")
 
-        self.refresh_ingredient_table()
+        self.refresh_ingredient_table(show_expiry_alert=True)
 
-    def show_add_ingredient_dialog(self):
+    def show_add_ingredient_dialog(self, edit_row=None):
+        if not isinstance(edit_row, int):
+            edit_row = None
+        is_edit = edit_row is not None and 0 <= edit_row < len(self.ingredients)
         dialog = QDialog(self)
-        dialog.setWindowTitle("添加食材入库")
+        dialog.setWindowTitle("编辑食材" if is_edit else "添加食材入库")
         dialog.setFixedSize(380, 400)
 
         name_edit = QLineEdit()
-        quantity_edit = QLineEdit()
+        amount_edit = QLineEdit()
+        amount_edit.setPlaceholderText("例如 2 或 1.5")
+        unit_box = QComboBox()
+        unit_box.addItems(INGREDIENT_UNITS)
+        unit_box.setEditable(True)
+        unit_box.setFixedWidth(96)
+        amount_unit_row = QWidget()
+        amount_unit_layout = QHBoxLayout(amount_unit_row)
+        amount_unit_layout.setContentsMargins(0, 0, 0, 0)
+        amount_unit_layout.setSpacing(8)
+        amount_unit_layout.addWidget(amount_edit, 1)
+        amount_unit_layout.addWidget(unit_box)
         expiry_edit = QDateEdit()
         expiry_edit.setDisplayFormat("yyyy-MM-dd")
         expiry_edit.setDate(QDate.currentDate())
@@ -121,15 +209,34 @@ class MainWindow(QTabWidget):
         category_box.addItems(["蔬菜", "肉类", "水果", "调料", "主食", "水产", "蛋奶"])
         location_edit = QLineEdit()
 
-        btn_confirm = QPushButton("确认添加")
+        btn_confirm = QPushButton("保存修改" if is_edit else "确认添加")
         btn_confirm.setObjectName("primaryBtn")
         btn_cancel = QPushButton("取消")
+
+        if is_edit:
+            item = normalize_pantry_item(dict(self.ingredients[edit_row]))
+            name_edit.setText(item["name"])
+            amount_edit.setText(
+                str(int(item["amount"]))
+                if item.get("amount") == int(item.get("amount", 1))
+                else str(item.get("amount", 1))
+            )
+            idx = unit_box.findText(item.get("unit", "个"))
+            if idx >= 0:
+                unit_box.setCurrentIndex(idx)
+            else:
+                unit_box.setEditText(item.get("unit", "个"))
+            expiry_edit.setDate(QDate(item["expiry"].year, item["expiry"].month, item["expiry"].day))
+            cidx = category_box.findText(item.get("category", "蔬菜"))
+            if cidx >= 0:
+                category_box.setCurrentIndex(cidx)
+            location_edit.setText(item.get("location", ""))
 
         form_layout = QFormLayout()
         form_layout.setSpacing(12)
         form_layout.setContentsMargins(25, 25, 25, 15)
         form_layout.addRow("食材名称：", name_edit)
-        form_layout.addRow("数量/单位：", quantity_edit)
+        form_layout.addRow("数量/单位：", amount_unit_row)
         form_layout.addRow("保质期：", expiry_edit)
         form_layout.addRow("食材分类：", category_box)
         form_layout.addRow("存放位置：", location_edit)
@@ -147,83 +254,107 @@ class MainWindow(QTabWidget):
 
         def add_item():
             name = name_edit.text().strip()
-            quantity = quantity_edit.text().strip()
+            unit = unit_box.currentText().strip() or "个"
             expiry = expiry_edit.date().toPyDate()
             category = category_box.currentText()
             location = location_edit.text().strip()
-            if not name or not quantity:
-                QMessageBox.warning(dialog, "输入错误", "请填写食材名称和数量/单位。")
+            if not name:
+                QMessageBox.warning(dialog, "输入错误", "请填写食材名称。")
                 return
-            self.ingredients.append({
+            try:
+                amount = parse_amount_text(amount_edit.text())
+            except ValueError:
+                QMessageBox.warning(dialog, "输入错误", "请填写有效的数量（大于 0 的数字）。")
+                return
+            entry = {
                 "name": name,
-                "quantity": quantity,
+                "amount": amount,
+                "unit": unit,
                 "expiry": expiry,
                 "category": category,
-                "location": location
-            })
-            self.refresh_ingredient_table()
+                "location": location,
+            }
+            if is_edit:
+                self.ingredients[edit_row] = entry
+            else:
+                self.ingredients.append(entry)
+            self.refresh_ingredient_table(show_expiry_alert=True)
+            self._refresh_ingredient_picker()
             dialog.accept()
 
         btn_confirm.clicked.connect(add_item)
         btn_cancel.clicked.connect(dialog.reject)
         dialog.exec()
 
-    def refresh_ingredient_table(self):
+    def refresh_ingredient_table(self, *, show_expiry_alert: bool = False):
+        self.ingredients = [normalize_pantry_item(dict(x)) for x in self.ingredients]
         self.ingredient_table.setRowCount(len(self.ingredients))
         now = datetime.now().date()
         for row, item in enumerate(self.ingredients):
             expiry = item["expiry"]
             days_left = (expiry - now).days
-            
-            # 3. 建立数据单元格并统一设置为【居中对齐】
+            amount = item.get("amount", 1.0)
+            unit = item.get("unit", "个")
+
             name_item = QTableWidgetItem(item["name"])
-            quantity_item = QTableWidgetItem(item["quantity"])
+            amount_unit_item = QTableWidgetItem(format_amount_display(amount, unit))
             expiry_item = QTableWidgetItem(expiry.strftime("%Y-%m-%d"))
             category_item = QTableWidgetItem(item["category"])
             location_item = QTableWidgetItem(item["location"])
-            
-            for cell_item in [name_item, quantity_item, expiry_item, category_item, location_item]:
+
+            for cell_item in [
+                name_item, amount_unit_item, expiry_item, category_item, location_item
+            ]:
                 cell_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            # 4. 表格内嵌按钮的缩放与居中修正（防止按钮撑满格子变形）
-            delete_btn_container = QWidget()
-            delete_btn_layout = QHBoxLayout()
+            op_container = QWidget()
+            op_container.setStyleSheet("background: transparent;")
+            op_layout = QHBoxLayout(op_container)
+            op_layout.setContentsMargins(2, 4, 4, 4)
+            op_layout.setSpacing(4)
+            op_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            edit_btn = QPushButton("编辑")
+            edit_btn.setObjectName("secondaryBtn")
+            edit_btn.setFixedSize(48, 24)
+            edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            edit_btn.clicked.connect(
+                lambda _checked, r=row: self.show_add_ingredient_dialog(edit_row=r)
+            )
             delete_btn = QPushButton("删除")
             delete_btn.setObjectName("dangerBtn")
-            delete_btn.setFixedSize(80, 28) # 锁定按钮比例并保证内容完全显示
+            delete_btn.setFixedSize(48, 24)
             delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            delete_btn.clicked.connect(lambda checked, r=row: self.delete_ingredient(r))
-            delete_btn_layout.addWidget(delete_btn)
-            delete_btn_container.setFixedWidth(100)
-            delete_btn_layout.setContentsMargins(0, 0, 0, 0)
-            delete_btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            delete_btn_container.setLayout(delete_btn_layout)
+            delete_btn.clicked.connect(lambda _checked, r=row: self.delete_ingredient(r))
+            op_layout.addWidget(edit_btn)
+            op_layout.addWidget(delete_btn)
 
-            # 5. 高级色彩体系（替换原生的刺眼正红和正黄）
             if days_left < 0:
-                bg_color = QColor("#FADBD8") # 优雅莫兰迪淡粉红（过期）
+                bg_color = QColor("#ffe4e6")
                 expiry_item.setToolTip("已过期")
             elif days_left <= 3:
-                bg_color = QColor("#FCF3CF") # 柔和马卡龙暖浅黄（临近过期）
+                bg_color = QColor("#fef3c7")
                 expiry_item.setToolTip(f"剩余 {days_left} 天")
             else:
                 bg_color = None
 
-            for col, widget_item in enumerate([name_item, quantity_item, expiry_item, category_item, location_item]):
+            for col, widget_item in enumerate(
+                [name_item, amount_unit_item, expiry_item, category_item, location_item]
+            ):
                 if bg_color is not None:
                     widget_item.setBackground(bg_color)
                 self.ingredient_table.setItem(row, col, widget_item)
-                
-            # 必须用 setCellWidget 装载包裹好的居中按钮容器
-            self.ingredient_table.setCellWidget(row, 5, delete_btn_container)
 
-        self.check_expiry_alert()
+            self.ingredient_table.setCellWidget(row, 5, op_container)
+
+        if show_expiry_alert:
+            self.check_expiry_alert()
 
     # (delete_ingredient, remove_selected_ingredient, check_expiry_alert 保持原样不变...)
     def delete_ingredient(self, row):
         if 0 <= row < len(self.ingredients):
             del self.ingredients[row]
             self.refresh_ingredient_table()
+            self._refresh_ingredient_picker()
 
     def remove_selected_ingredient(self):
         rows = sorted({idx.row() for idx in self.ingredient_table.selectedIndexes()}, reverse=True)
@@ -234,6 +365,7 @@ class MainWindow(QTabWidget):
             if 0 <= row < len(self.ingredients):
                 del self.ingredients[row]
         self.refresh_ingredient_table()
+        self._refresh_ingredient_picker()
 
     def check_expiry_alert(self):
         now = datetime.now().date()
@@ -253,78 +385,330 @@ class MainWindow(QTabWidget):
                 message_parts.append("即将过期食材：\n" + "\n".join(soon))
             QMessageBox.warning(self, "保质期提醒", "\n\n".join(message_parts))
 
+    def _get_selected_recipe(self):
+        current = self.recipe_list.currentItem()
+        if not current:
+            return None
+        recipe = current.data(Qt.ItemDataRole.UserRole)
+        if not recipe or not isinstance(recipe, dict) or not recipe.get("name"):
+            return None
+        return recipe
+
+    def _update_mark_cooked_button_state(self):
+        if not hasattr(self, "btn_mark_cooked"):
+            return
+        recipe = self._get_selected_recipe()
+        self.btn_mark_cooked.setEnabled(recipe is not None)
+
+    def _get_recipe_for_cooking(self):
+        recipe = self._active_recipe_for_cooking or self._get_selected_recipe()
+        return recipe
+
+    def start_mark_cooked_flow(self):
+        recipe = self._get_recipe_for_cooking()
+        if not recipe:
+            QMessageBox.information(self, "提示", "请先在左侧选择一道菜谱。")
+            return
+        if not self.ingredients:
+            QMessageBox.information(self, "提示", "食材库存为空，无需扣减。")
+            return
+
+        servings = self._ask_servings()
+        if servings is None:
+            return
+
+        names = recipe_ingredients_from_dict(recipe)
+        if not names:
+            QMessageBox.information(self, "提示", "当前菜谱没有可用的食材列表。")
+            return
+
+        plan = plan_deductions(names, self.ingredients, servings)
+        confirmed = self._show_deduction_confirm_dialog(plan, servings)
+        if not confirmed:
+            return
+
+        self.ingredients, summary = apply_deductions(self.ingredients, confirmed)
+        self.refresh_ingredient_table()
+        self._refresh_ingredient_picker()
+        QMessageBox.information(
+            self,
+            "库存已更新",
+            f"已扣减 {summary.deducted_count} 种食材，"
+            f"用尽并删除 {summary.removed_count} 种；"
+            f"跳过 {summary.skipped_count} 种（冰箱无货或未匹配）。",
+        )
+
+    def _ask_servings(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("选择几人份")
+        dialog.setFixedSize(300, 140)
+        label = QLabel("本道菜按几人份扣减库存？")
+        servings_box = QComboBox()
+        for n in SERVING_OPTIONS:
+            servings_box.addItem(f"{n} 人份", n)
+        servings_box.setCurrentIndex(0)
+        btn_ok = QPushButton("下一步")
+        btn_ok.setObjectName("primaryBtn")
+        btn_cancel = QPushButton("取消")
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_ok)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.addWidget(label)
+        layout.addWidget(servings_box)
+        layout.addLayout(btn_row)
+        result = {"value": None}
+
+        def on_ok():
+            result["value"] = float(servings_box.currentData())
+            dialog.accept()
+
+        btn_ok.clicked.connect(on_ok)
+        btn_cancel.clicked.connect(dialog.reject)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return result["value"]
+
+    def _show_deduction_confirm_dialog(self, plan, servings):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"确认扣减库存（{int(servings) if servings == int(servings) else servings} 人份）")
+        dialog.resize(620, 400)
+        table = QTableWidget()
+        table.setColumnCount(5)
+        table.setHorizontalHeaderLabels(
+            ["菜谱食材", "冰箱匹配", "扣减数量", "单位", "扣减后剩余"]
+        )
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+
+        spinboxes = []
+        table.setRowCount(len(plan))
+        for row, item in enumerate(plan):
+            table.setItem(row, 0, QTableWidgetItem(item.recipe_ingredient))
+            if item.matched:
+                match_text = f"{item.pantry_name}（现有 {format_amount_display(item.current_amount, item.unit)}）"
+                spin = QDoubleSpinBox()
+                spin.setRange(0, max(item.current_amount, item.deduct_amount))
+                spin.setDecimals(2)
+                spin.setValue(item.deduct_amount)
+                spin.setSingleStep(0.5)
+                spinboxes.append((row, item, spin))
+                table.setCellWidget(row, 2, spin)
+                table.setItem(row, 1, QTableWidgetItem(match_text))
+                table.setItem(row, 3, QTableWidgetItem(item.unit))
+                rem_item = QTableWidgetItem(
+                    format_amount_display(item.remaining_after, item.unit)
+                )
+                spin.valueChanged.connect(
+                    lambda v, s=spin, it=item, ri=rem_item: ri.setText(
+                        format_amount_display(max(0.0, it.current_amount - v), it.unit)
+                    )
+                )
+                table.setItem(row, 4, rem_item)
+            else:
+                spinboxes.append((row, item, None))
+                skip = QTableWidgetItem(item.skip_reason or "跳过")
+                skip.setForeground(QColor("#94a3b8"))
+                table.setItem(row, 1, skip)
+                for col in range(2, 5):
+                    table.setItem(row, col, QTableWidgetItem("—"))
+
+        btn_ok = QPushButton("确认扣减")
+        btn_ok.setObjectName("primaryBtn")
+        btn_cancel = QPushButton("取消")
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_ok)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.addWidget(QLabel("可调整每种食材的扣减数量，0 表示不扣减："))
+        layout.addWidget(table)
+        layout.addLayout(btn_row)
+        confirmed = {"plan": None}
+
+        def on_ok():
+            out = []
+            for _row, item, spin in spinboxes:
+                if spin is None:
+                    out.append(item)
+                    continue
+                copy = DeductionRow(
+                    recipe_ingredient=item.recipe_ingredient,
+                    pantry_index=item.pantry_index,
+                    pantry_name=item.pantry_name,
+                    deduct_amount=spin.value(),
+                    unit=item.unit,
+                    current_amount=item.current_amount,
+                    remaining_after=max(0.0, item.current_amount - spin.value()),
+                    matched=True,
+                )
+                out.append(copy)
+            confirmed["plan"] = out
+            dialog.accept()
+
+        btn_ok.clicked.connect(on_ok)
+        btn_cancel.clicked.connect(dialog.reject)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return confirmed["plan"]
+
     def init_recipe_tab(self):
         self.recipe_tab = QWidget()
         self.mode_box = QComboBox()
         self.mode_box.addItems(["用现有食材做", "按需求做"])
+        self.mode_box.currentTextChanged.connect(self._on_recipe_mode_changed)
+
+        self.ingredient_pick_widget = QWidget()
+        pick_layout = QVBoxLayout(self.ingredient_pick_widget)
+        pick_layout.setContentsMargins(0, 4, 0, 0)
+        pick_layout.setSpacing(6)
+        pick_label = QLabel("勾选要用于推荐的食材：")
+        pick_label.setObjectName("sectionLabel")
+        self.ingredient_pick_list = QListWidget()
+        self.ingredient_pick_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection
+        )
+        self.ingredient_pick_list.setMinimumHeight(140)
+        self.ingredient_pick_list.setMaximumHeight(240)
+        self.ingredient_pick_list.setSpacing(4)
+        pick_layout.addWidget(pick_label)
+        pick_layout.addWidget(self.ingredient_pick_list)
+
         self.diet_box = QComboBox()
         self.diet_box.addItems(["家常菜", "减脂餐", "增肌餐", "素食", "控糖"])
         self.time_box = QComboBox()
         self.time_box.addItems(["15分钟内", "15-30分钟", "30分钟以上"])
         self.diff_box = QComboBox()
         self.diff_box.addItems(["简单", "中等", "困难"])
+        for combo in (
+            self.mode_box,
+            self.diet_box,
+            self.time_box,
+            self.diff_box,
+        ):
+            combo.setMinimumHeight(36)
 
-        btn_generate = QPushButton("🔍 生成智能食谱")
+        self.exclude_edit = QLineEdit()
+        self.exclude_edit.setPlaceholderText("不吃/排除的食材，逗号分隔，如：香菜,葱")
+
+        btn_generate = QPushButton("生成食谱")
         btn_generate.setObjectName("primaryBtn") # 高亮绿
         btn_generate.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_generate.clicked.connect(self.generate_recipe_list)
 
-        self.btn_ai_recipe = QPushButton("✨ AI 生成详细步骤")
+        self.btn_ai_recipe = QPushButton("AI 生成详细步骤")
+        self.btn_ai_recipe.setObjectName("secondaryBtn")
         self.btn_ai_recipe.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_ai_recipe.clicked.connect(self.start_ai_recipe_generation)
+
+        self.btn_mark_cooked = QPushButton("我已做完")
+        self.btn_mark_cooked.setObjectName("primaryBtn")
+        self.btn_mark_cooked.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_mark_cooked.setEnabled(False)
+        self.btn_mark_cooked.clicked.connect(self.start_mark_cooked_flow)
 
         form_layout = QFormLayout()
         form_layout.setSpacing(10)
         form_layout.addRow("生成模式：", self.mode_box)
+        form_layout.addRow("", self.ingredient_pick_widget)
         form_layout.addRow("饮食偏好：", self.diet_box)
         form_layout.addRow("烹饪时间：", self.time_box)
         form_layout.addRow("难度级别：", self.diff_box)
+        form_layout.addRow("排除食材：", self.exclude_edit)
         btn_row = QHBoxLayout()
         btn_row.addWidget(btn_generate)
         btn_row.addWidget(self.btn_ai_recipe)
+        btn_row.addWidget(self.btn_mark_cooked)
         btn_row.addStretch()
         form_layout.addRow("", btn_row)
+
+        self.btn_buy_missing = QPushButton("购买缺料")
+        self.btn_buy_missing.setObjectName("secondaryBtn")
+        self.btn_buy_missing.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_buy_missing.clicked.connect(self.add_missing_to_shopping_list)
+        self.btn_add_recipe_shop = QPushButton("加入购物清单")
+        self.btn_add_recipe_shop.setObjectName("secondaryBtn")
+        self.btn_add_recipe_shop.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_add_recipe_shop.clicked.connect(self.add_recipe_ingredients_to_shopping_list)
+        shop_btn_row = QHBoxLayout()
+        shop_btn_row.addWidget(self.btn_buy_missing)
+        shop_btn_row.addWidget(self.btn_add_recipe_shop)
+        shop_btn_row.addStretch()
+        form_layout.addRow("购物联动：", shop_btn_row)
+
+        self.llm_status_label = QLabel("")
+        self.llm_status_label.setObjectName("pageSubtitle")
+        form_layout.addRow("AI 引擎：", self.llm_status_label)
 
         group = QGroupBox("个性化食谱筛选")
         group.setLayout(form_layout)
 
-        header_label = QLabel("🍽️ 智能食谱助手为您推荐更健康的做法")
-        header_label.setStyleSheet("font-size:14px; color:#3a5f47; margin-bottom:10px;")
-        header_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        header_label = QLabel("智能食谱助手")
+        header_label.setObjectName("pageTitle")
+        recipe_subtitle = QLabel("根据冰箱食材或饮食偏好，为您推荐合适菜谱")
+        recipe_subtitle.setObjectName("pageSubtitle")
 
         self.recipe_list = QListWidget()
         self.recipe_list.itemClicked.connect(self.show_recipe_detail)
+        self.recipe_list.currentItemChanged.connect(
+            lambda _cur, _prev: self._update_mark_cooked_button_state()
+        )
 
         self.recipe_detail = QTextEdit()
         self.recipe_detail.setReadOnly(True)
         self.recipe_detail.setPlaceholderText("💡 请在左侧选择感兴趣的食谱查看详细做法、配料用量及烹饪技巧说明。")
 
-        recipe_layout = QHBoxLayout()
-        recipe_layout.addWidget(self.recipe_list, 2)
-        recipe_layout.addWidget(self.recipe_detail, 3)
+        recipe_card = QFrame()
+        recipe_card.setObjectName("contentCard")
+        recipe_card_layout = QHBoxLayout(recipe_card)
+        recipe_card_layout.setContentsMargins(12, 12, 12, 12)
+        recipe_card_layout.setSpacing(12)
+        recipe_card_layout.addWidget(self.recipe_list, 2)
+        recipe_card_layout.addWidget(self.recipe_detail, 3)
 
-        layout = QVBoxLayout()
-        layout.setContentsMargins(15, 15, 15, 15)
+        tip_label = QLabel("推荐菜谱")
+        tip_label.setObjectName("sectionLabel")
+
+        recipe_card.setMinimumHeight(360)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(20, 16, 20, 20)
+        layout.setSpacing(12)
         layout.addWidget(header_label)
+        layout.addWidget(recipe_subtitle)
         layout.addWidget(group)
-        layout.addSpacing(12)
-        tip_label = QLabel("📋 为您精准推荐的健康菜谱：")
-        tip_label.setStyleSheet("font-weight:bold; color:#2f3a3a;")
         layout.addWidget(tip_label)
-        layout.addLayout(recipe_layout)
-        self.recipe_tab.setLayout(layout)
+        layout.addWidget(recipe_card, 1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        scroll.setWidget(content)
+
+        tab_layout = QVBoxLayout(self.recipe_tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll)
         self.addTab(self.recipe_tab, "智能食谱")
         
-        # 初始化清空默认提示
         self.recipe_list.clear()
+        self._on_recipe_mode_changed(self.mode_box.currentText())
 
-    # (generate_recipe_list, show_recipe_detail 保持原样不变...)
     def generate_recipe_list(self):
         mode = self.mode_box.currentText()
         diet = self.diet_box.currentText()
         time = self.time_box.currentText()
         diff = self.diff_box.currentText()
-        ingredient_names = [item["name"] for item in self.ingredients]
+        ingredient_names = self._ingredient_names_for_recipe()
+        exclude_set = self._parse_exclude_ingredients()
+        ingredient_names = [n for n in ingredient_names if n not in exclude_set]
         results = []
 
         try:
@@ -332,9 +716,13 @@ class MainWindow(QTabWidget):
 
             svc = get_recipe_service()
             if mode == "用现有食材做":
-                if not ingredient_names:
+                if not self.ingredients:
                     QMessageBox.information(
                         self, "提示", "请先在「食材管理」中添加冰箱食材。"
+                    )
+                elif not ingredient_names:
+                    QMessageBox.information(
+                        self, "提示", "请至少勾选一种要用于推荐的食材。"
                     )
                 else:
                     results = svc.search_by_ingredients(
@@ -347,15 +735,34 @@ class MainWindow(QTabWidget):
         except Exception:
             ingredient_set = set(ingredient_names)
             if mode == "用现有食材做":
+                # 服务异常时退化到本地规则匹配：至少命中一个食材，按命中比例排序
+                ranked = []
                 for recipe in self.recipes:
-                    if set(recipe["ingredients"]).issubset(ingredient_set):
-                        results.append(recipe)
+                    recipe_set = set(recipe["ingredients"])
+                    if not recipe_set:
+                        continue
+                    overlap = len(recipe_set & ingredient_set)
+                    if overlap <= 0:
+                        continue
+                    score = overlap / len(recipe_set)
+                    item = dict(recipe)
+                    item["match_score"] = score
+                    ranked.append(item)
+                ranked.sort(key=lambda r: r.get("match_score", 0), reverse=True)
+                results = ranked[:10]
             else:
                 results = [
                     r
                     for r in self.recipes
                     if diet in r["tags"] and r["time"] == time and r["diff"] == diff
                 ]
+
+        if exclude_set:
+            results = [
+                r
+                for r in results
+                if not exclude_set.intersection(set(r.get("ingredients") or []))
+            ]
 
         self.recipe_list.clear()
         if results:
@@ -369,18 +776,26 @@ class MainWindow(QTabWidget):
             self.recipe_detail.clear()
             self.recipe_list.setCurrentRow(0)
             self.show_recipe_detail(self.recipe_list.item(0))
+            self._active_recipe_for_cooking = results[0]
         else:
             self.recipe_list.addItem("⚠️ 未找到匹配食谱，请调整食材或筛选条件")
             self.recipe_detail.clear()
+            self._active_recipe_for_cooking = None
+        self._update_mark_cooked_button_state()
 
     def start_ai_recipe_generation(self):
-        ingredient_names = [item["name"] for item in self.ingredients]
-        if not ingredient_names:
+        if not self.ingredients:
             QMessageBox.information(self, "提示", "请先在「食材管理」中添加食材。")
+            return
+        ingredient_names = self._ingredient_names_for_recipe()
+        if self.mode_box.currentText() == "用现有食材做" and not ingredient_names:
+            QMessageBox.information(self, "提示", "请至少勾选一种要用于生成菜谱的食材。")
             return
 
         current = self.recipe_list.currentItem()
         recipe = current.data(Qt.ItemDataRole.UserRole) if current else None
+        if recipe and isinstance(recipe, dict):
+            self._active_recipe_for_cooking = recipe
         recipe_name = (recipe or {}).get("name", "")
         diet = self.diet_box.currentText()
         time = self.time_box.currentText()
@@ -409,15 +824,35 @@ class MainWindow(QTabWidget):
         self.thread_pool.start(worker)
 
     def _on_ai_recipe_ready(self, text):
+        if not self._active_recipe_for_cooking:
+            self._active_recipe_for_cooking = self._get_selected_recipe()
         html = (
-            "<h2 style='color:#27ae60;'>✨ AI 生成菜谱</h2>"
+            "<h2 style='color:#0d9488;'>AI 生成菜谱</h2>"
             f"<pre style='white-space:pre-wrap; font-family:Microsoft YaHei, sans-serif;"
             f" line-height:1.7; color:#333;'>{self._escape_html(text)}</pre>"
         )
         self.recipe_detail.setHtml(html)
+        self._update_mark_cooked_button_state()
 
     def _on_ai_recipe_error(self, message):
-        self.recipe_detail.setPlainText(f"生成失败：{message}\n\n请确认已下载本地模型或配置 DEEPSEEK_API_KEY。")
+        import sys
+
+        extra = ""
+        if "access violation" in message.lower():
+            extra = (
+                "\n\n提示：本地模型在后台线程调用时可能崩溃，已尝试子进程隔离。"
+                "若仍失败，请完全退出后重新启动应用，或配置 DEEPSEEK_API_KEY 使用云端生成。"
+            )
+        elif "llama" in message.lower() or "LocalLLM" in message:
+            from llm.deps import format_llm_setup_hint
+
+            extra = f"\n\n{format_llm_setup_hint()}"
+
+        self.recipe_detail.setPlainText(
+            f"生成失败：{message}{extra}\n\n"
+            "也可配置云端：设置环境变量 DEEPSEEK_API_KEY 后重启。\n"
+            f"当前 Python：{sys.executable}"
+        )
 
     @staticmethod
     def _escape_html(text: str) -> str:
@@ -430,6 +865,8 @@ class MainWindow(QTabWidget):
     def show_recipe_detail(self, item):
         recipe = item.data(Qt.ItemDataRole.UserRole)
         if recipe:
+            self._active_recipe_for_cooking = recipe
+            self._update_mark_cooked_button_state()
             ingredients = "、".join(recipe.get("ingredients", []))
             score_line = ""
             if recipe.get("match_score") is not None:
@@ -452,7 +889,7 @@ class MainWindow(QTabWidget):
                     f"<p style='line-height:1.8; color:#555555;'>{recipe.get('description', '')}</p>"
                 )
             self.recipe_detail.setHtml(
-                f"<h2 style='color:#27ae60;'>🍳 {recipe['name']}</h2>"
+                f"<h2 style='color:#0d9488;'>{recipe['name']}</h2>"
                 f"<p><b>推荐标签：</b><span style='color:#e67e22;'>{','.join(recipe.get('tags', []))}</span> | "
                 f"<b>烹饪时间：</b>{recipe.get('time', '')} | <b>难度：</b>{recipe.get('diff', '')}</p>"
                 f"{score_line}{missing_line}"
@@ -468,40 +905,59 @@ class MainWindow(QTabWidget):
         self.shop_table = QTableWidget()
         self.shop_table.setColumnCount(4)
         self.shop_table.setHorizontalHeaderLabels(["食材名称", "数量", "单位", "已购买"])
-        self.shop_table.horizontalHeader().setStretchLastSection(True)
+        self.shop_table.setShowGrid(False)
         self.shop_table.setAlternatingRowColors(True)
         self.shop_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.shop_table.verticalHeader().setDefaultSectionSize(38)
+        self.shop_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.shop_table.verticalHeader().setDefaultSectionSize(42)
         self.shop_table.verticalHeader().setVisible(False)
+        shop_header = self.shop_table.horizontalHeader()
+        shop_header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        for col in range(4):
+            shop_header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
 
-        btn_add = QPushButton("➕ 添加商品")
+        btn_add = QPushButton("添加商品")
+        btn_add.setObjectName("primaryBtn")
         btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_add.clicked.connect(self.show_add_shop_dialog)
-        btn_delete = QPushButton("🗑 删除选中")
+        btn_delete = QPushButton("删除选中")
         btn_delete.setObjectName("dangerBtn")
         btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_delete.clicked.connect(self.delete_selected_shop_items)
-        btn_export = QPushButton("📤 导出购物清单")
+        btn_export = QPushButton("导出购物清单")
         btn_export.setObjectName("primaryBtn")
         btn_export.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_export.clicked.connect(self.export_shopping_list)
+        btn_clear = QPushButton("清空清单")
+        btn_clear.setObjectName("dangerBtn")
+        btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_clear.clicked.connect(self.clear_all_shopping_items)
 
         btn_layout = QHBoxLayout()
         btn_layout.addWidget(btn_add)
         btn_layout.addWidget(btn_delete)
+        btn_layout.addWidget(btn_clear)
         btn_layout.addWidget(btn_export)
         btn_layout.addStretch()
 
-        header_label = QLabel("🛒 购物清单助手")
-        header_label.setStyleSheet("font-size:16px; font-weight:700; color:#1d6b43; margin-bottom:10px;")
-        header_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        header_label = QLabel("购物清单")
+        header_label.setObjectName("pageTitle")
+        shop_subtitle = QLabel("记录待购食材，支持导出 CSV")
+        shop_subtitle.setObjectName("pageSubtitle")
+
+        shop_card = QFrame()
+        shop_card.setObjectName("contentCard")
+        shop_card_layout = QVBoxLayout(shop_card)
+        shop_card_layout.setContentsMargins(12, 12, 12, 12)
+        shop_card_layout.addWidget(self.shop_table)
 
         layout = QVBoxLayout()
-        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setContentsMargins(20, 16, 20, 20)
+        layout.setSpacing(12)
         layout.addWidget(header_label)
+        layout.addWidget(shop_subtitle)
         layout.addLayout(btn_layout)
-        layout.addSpacing(8)
-        layout.addWidget(self.shop_table)
+        layout.addWidget(shop_card, 1)
         self.shop_tab.setLayout(layout)
         self.addTab(self.shop_tab, "购物清单")
         self.refresh_shop_table()
@@ -542,7 +998,14 @@ class MainWindow(QTabWidget):
             if not name or not quantity or not unit:
                 QMessageBox.warning(dialog, "输入错误", "请填写完整购物项目。")
                 return
-            self.shopping_items.append({"name": name, "quantity": quantity, "unit": unit, "bought": bought})
+            self.shopping_items.append(
+                {
+                    "name": name,
+                    "quantity": quantity,
+                    "unit": unit,
+                    "bought": bought,
+                }
+            )
             self.refresh_shop_table()
             dialog.accept()
         btn_confirm.clicked.connect(add_item)
@@ -553,15 +1016,35 @@ class MainWindow(QTabWidget):
         self.shop_table.setRowCount(len(self.shopping_items))
         for row, item in enumerate(self.shopping_items):
             n_item = QTableWidgetItem(item["name"])
-            q_item = QTableWidgetItem(item["quantity"])
+            q_item = QTableWidgetItem(str(item["quantity"]))
             u_item = QTableWidgetItem(item["unit"])
-            b_item = QTableWidgetItem("是" if item["bought"] else "否")
-            for it in [n_item, q_item, u_item, b_item]:
+            for it in [n_item, q_item, u_item]:
                 it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.shop_table.setItem(row, 0, n_item)
             self.shop_table.setItem(row, 1, q_item)
             self.shop_table.setItem(row, 2, u_item)
-            self.shop_table.setItem(row, 3, b_item)
+            cb_wrap = QWidget()
+            cb_layout = QHBoxLayout(cb_wrap)
+            cb_layout.setContentsMargins(0, 0, 0, 0)
+            cb_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            checkbox = QCheckBox()
+            checkbox.setChecked(bool(item.get("bought")))
+            checkbox.stateChanged.connect(
+                lambda _state, r=row: self._on_shop_item_checked(r)
+            )
+            cb_layout.addWidget(checkbox)
+            self.shop_table.setCellWidget(row, 3, cb_wrap)
+
+    def _on_shop_item_checked(self, row: int) -> None:
+        if row < 0 or row >= len(self.shopping_items):
+            return
+        cb = self.shop_table.cellWidget(row, 3)
+        if cb is None:
+            return
+        checkbox = cb.findChild(QCheckBox)
+        if checkbox is None:
+            return
+        self.shopping_items[row]["bought"] = checkbox.isChecked()
 
     def delete_selected_shop_items(self):
         rows = sorted({idx.row() for idx in self.shop_table.selectedIndexes()}, reverse=True)
@@ -571,6 +1054,20 @@ class MainWindow(QTabWidget):
         for row in rows:
             if 0 <= row < len(self.shopping_items):
                 del self.shopping_items[row]
+        self.refresh_shop_table()
+
+    def clear_all_shopping_items(self):
+        if not self.shopping_items:
+            return
+        reply = QMessageBox.question(
+            self,
+            "清空购物清单",
+            "确定要清空全部购物项吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.shopping_items.clear()
         self.refresh_shop_table()
 
     def export_shopping_list(self):
@@ -599,12 +1096,23 @@ class MainWindow(QTabWidget):
         splitter.addWidget(self.knowledge_nav)
         splitter.addWidget(self.knowledge_content)
         splitter.setSizes([220, 700])
+        label = QLabel("饮食健康知识库")
+        label.setObjectName("pageTitle")
+        knowledge_subtitle = QLabel("食材保存、搭配与人群饮食建议")
+        knowledge_subtitle.setObjectName("pageSubtitle")
+
+        knowledge_card = QFrame()
+        knowledge_card.setObjectName("contentCard")
+        knowledge_card_layout = QVBoxLayout(knowledge_card)
+        knowledge_card_layout.setContentsMargins(8, 8, 8, 8)
+        knowledge_card_layout.addWidget(splitter)
+
         layout = QVBoxLayout()
-        layout.setContentsMargins(15, 15, 15, 15)
-        label = QLabel("💡 饮食健康知识库导航")
-        label.setStyleSheet("font-size:14px; font-weight:bold; color:#27ae60; margin-bottom:5px;")
+        layout.setContentsMargins(20, 16, 20, 20)
+        layout.setSpacing(12)
         layout.addWidget(label)
-        layout.addWidget(splitter)
+        layout.addWidget(knowledge_subtitle)
+        layout.addWidget(knowledge_card, 1)
         self.knowledge_tab.setLayout(layout)
         self.addTab(self.knowledge_tab, "饮食知识")
         self.knowledge_nav.setCurrentRow(0)
@@ -614,4 +1122,139 @@ class MainWindow(QTabWidget):
             self.knowledge_content.clear()
             return
         key = self.knowledge_nav.item(index).text()
-        self.knowledge_content.setHtml(f"<h3 style='color:#27ae60; margin-top:0px;'>📘 {key}</h3><p style='line-height:1.8; color:#444444;'>{self.knowledge_books.get(key, '').replace(chr(10), '<br>')}</p>")
+        self.knowledge_content.setHtml(
+            f"<h3 style='color:#0d9488; margin-top:0;'>{key}</h3>"
+            f"<p style='line-height:1.8; color:#475569;'>{self.knowledge_books.get(key, '').replace(chr(10), '<br>')}</p>"
+        )
+
+    def _parse_exclude_ingredients(self) -> set:
+        text = self.exclude_edit.text().strip() if hasattr(self, "exclude_edit") else ""
+        if not text:
+            return set()
+        parts = text.replace("，", ",").replace("、", ",").split(",")
+        return {p.strip() for p in parts if p.strip()}
+
+    def _merge_shopping_names(self, names: list) -> int:
+        existing = {it["name"] for it in self.shopping_items}
+        added = 0
+        for name in names:
+            n = (name or "").strip()
+            if not n or n in existing:
+                continue
+            self.shopping_items.append(
+                {"name": n, "quantity": "1", "unit": "个", "bought": False}
+            )
+            existing.add(n)
+            added += 1
+        self.refresh_shop_table()
+        return added
+
+    def add_missing_to_shopping_list(self) -> None:
+        recipe = self._get_selected_recipe()
+        if not recipe:
+            QMessageBox.information(self, "提示", "请先在左侧选择一道菜谱。")
+            return
+        missing = recipe.get("missing_ingredients") or []
+        if not missing:
+            QMessageBox.information(self, "提示", "当前菜谱没有缺少的食材。")
+            return
+        added = self._merge_shopping_names(missing)
+        QMessageBox.information(
+            self, "已加入购物清单", f"已添加 {added} 种缺料食材（重复项已跳过）。"
+        )
+
+    def add_recipe_ingredients_to_shopping_list(self) -> None:
+        recipe = self._get_selected_recipe()
+        if not recipe:
+            QMessageBox.information(self, "提示", "请先在左侧选择一道菜谱。")
+            return
+        names = recipe.get("ingredients") or []
+        if not names:
+            QMessageBox.information(self, "提示", "当前菜谱没有食材列表。")
+            return
+        added = self._merge_shopping_names(names)
+        QMessageBox.information(
+            self, "已加入购物清单", f"已添加 {added} 种食材（重复项已跳过）。"
+        )
+
+    def _refresh_llm_status_label(self) -> None:
+        if not hasattr(self, "llm_status_label"):
+            return
+        try:
+            from services.recipe_service import get_recipe_service
+
+            status = get_recipe_service().llm_status()
+            engine = status.get("engine", "none")
+            labels = {"local": "本地 Qwen", "cloud": "云端 DeepSeek", "none": "未就绪"}
+            hint = status.get("hint", "")
+            text = f"当前：{labels.get(engine, engine)}"
+            if hint:
+                text += f"（{hint}）"
+            self.llm_status_label.setText(text)
+        except Exception as e:
+            self.llm_status_label.setText(f"状态未知：{e}")
+
+    def init_stats_tab(self) -> None:
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.figure import Figure
+
+        self.stats_tab = QWidget()
+        self.stats_figure = Figure(figsize=(8, 4))
+        self.stats_canvas = FigureCanvas(self.stats_figure)
+
+        btn_refresh = QPushButton("刷新图表")
+        btn_refresh.setObjectName("primaryBtn")
+        btn_refresh.clicked.connect(self._update_stats_charts)
+
+        layout = QVBoxLayout(self.stats_tab)
+        title = QLabel("数据统计")
+        title.setObjectName("pageTitle")
+        subtitle = QLabel("营养成分占比（当前选中菜谱）· 冰箱食材分类统计")
+        subtitle.setObjectName("pageSubtitle")
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addWidget(btn_refresh)
+        layout.addWidget(self.stats_canvas, 1)
+        self.addTab(self.stats_tab, "数据统计")
+        self._update_stats_charts()
+
+    def _update_stats_charts(self) -> None:
+        if not hasattr(self, "stats_figure"):
+            return
+        self.stats_figure.clear()
+        ax1 = self.stats_figure.add_subplot(1, 2, 1)
+        recipe = self._get_selected_recipe() or self._active_recipe_for_cooking
+        nutrition = (recipe or {}).get("nutrition") if recipe else None
+        if isinstance(nutrition, dict) and nutrition:
+            labels = []
+            sizes = []
+            for key, label in [
+                ("calories", "热量"),
+                ("protein", "蛋白质"),
+                ("carbs", "碳水"),
+                ("fat", "脂肪"),
+            ]:
+                val = nutrition.get(key)
+                if val is not None and float(val) > 0:
+                    labels.append(label)
+                    sizes.append(float(val))
+        else:
+            labels = ["蛋白质", "碳水", "脂肪", "其他"]
+            sizes = [25, 45, 20, 10]
+        ax1.pie(sizes, labels=labels, autopct="%1.0f%%", startangle=90)
+        ax1.set_title("营养占比（示意）")
+
+        ax2 = self.stats_figure.add_subplot(1, 2, 2)
+        categories = {}
+        for item in self.ingredients:
+            cat = item.get("category") or "未分类"
+            categories[cat] = categories.get(cat, 0) + 1
+        if not categories:
+            categories = {"暂无食材": 0}
+        cats = list(categories.keys())
+        counts = list(categories.values())
+        ax2.bar(cats, counts, color="#0d9488")
+        ax2.set_title("冰箱食材分类数量")
+        ax2.tick_params(axis="x", rotation=30)
+        self.stats_figure.tight_layout()
+        self.stats_canvas.draw()
