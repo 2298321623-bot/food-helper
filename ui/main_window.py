@@ -2,6 +2,7 @@ from PyQt6.QtWidgets import *
 from PyQt6.QtCore import QRunnable, QObject, pyqtSignal, Qt, QDate, QThreadPool
 from PyQt6.QtGui import QColor
 import csv
+import re
 from datetime import datetime
 
 from config import INGREDIENT_UNITS, SERVING_OPTIONS
@@ -14,6 +15,7 @@ from services.inventory_service import (
     plan_deductions,
     recipe_ingredients_from_dict,
 )
+from services.nutrition_service import summarize_pantry_nutrition
 
 # (WorkerSignals 与 Worker 类保持原样不变...)
 class WorkerSignals(QObject):
@@ -280,6 +282,7 @@ class MainWindow(QTabWidget):
                 self.ingredients.append(entry)
             self.refresh_ingredient_table(show_expiry_alert=True)
             self._refresh_ingredient_picker()
+            self.refresh_stats_view()
             dialog.accept()
 
         btn_confirm.clicked.connect(add_item)
@@ -355,6 +358,7 @@ class MainWindow(QTabWidget):
             del self.ingredients[row]
             self.refresh_ingredient_table()
             self._refresh_ingredient_picker()
+            self.refresh_stats_view()
 
     def remove_selected_ingredient(self):
         rows = sorted({idx.row() for idx in self.ingredient_table.selectedIndexes()}, reverse=True)
@@ -366,6 +370,7 @@ class MainWindow(QTabWidget):
                 del self.ingredients[row]
         self.refresh_ingredient_table()
         self._refresh_ingredient_picker()
+        self.refresh_stats_view()
 
     def check_expiry_alert(self):
         now = datetime.now().date()
@@ -430,6 +435,7 @@ class MainWindow(QTabWidget):
         self.ingredients, summary = apply_deductions(self.ingredients, confirmed)
         self.refresh_ingredient_table()
         self._refresh_ingredient_picker()
+        self.refresh_stats_view()
         QMessageBox.information(
             self,
             "库存已更新",
@@ -826,10 +832,18 @@ class MainWindow(QTabWidget):
     def _on_ai_recipe_ready(self, text):
         if not self._active_recipe_for_cooking:
             self._active_recipe_for_cooking = self._get_selected_recipe()
+        nutrition = self._extract_nutrition_from_ai_text(text)
+        display_text = (
+            self._strip_nutrition_section_from_ai_text(text)
+            if nutrition
+            else text
+        )
+        nutrition_html = self._build_ai_nutrition_html(nutrition)
         html = (
             "<h2 style='color:#0d9488;'>AI 生成菜谱</h2>"
             f"<pre style='white-space:pre-wrap; font-family:Microsoft YaHei, sans-serif;"
-            f" line-height:1.7; color:#333;'>{self._escape_html(text)}</pre>"
+            f" line-height:1.7; color:#333;'>{self._escape_html(display_text)}</pre>"
+            f"{nutrition_html}"
         )
         self.recipe_detail.setHtml(html)
         self._update_mark_cooked_button_state()
@@ -860,6 +874,149 @@ class MainWindow(QTabWidget):
             text.replace("&", "&amp;")
             .replace("<", "&lt;")
             .replace(">", "&gt;")
+        )
+
+    @staticmethod
+    def _extract_nutrition_from_ai_text(text: str) -> dict:
+        """从 AI 生成的 Markdown/普通文本中提取营养数值。"""
+        if not text:
+            return {}
+
+        normalized = text.replace("：", ":")
+        patterns = {
+            "calories": (
+                "热量",
+                ["热量", "卡路里", "能量"],
+                "kcal",
+            ),
+            "protein": (
+                "蛋白质",
+                ["蛋白质", "蛋白"],
+                "g",
+            ),
+            "carbs": (
+                "碳水",
+                ["碳水化合物", "碳水"],
+                "g",
+            ),
+            "fat": (
+                "脂肪",
+                ["脂肪"],
+                "g",
+            ),
+        }
+
+        result = {}
+        for key, (label, aliases, default_unit) in patterns.items():
+            alias_pattern = "|".join(re.escape(alias) for alias in aliases)
+            match = re.search(
+                rf"(?:{alias_pattern})[^\d\n\r]{{0,24}}(\d+(?:\.\d+)?)\s*(kcal|千卡|大卡|克|g|G)?",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+            if not match:
+                continue
+            value = float(match.group(1))
+            unit = match.group(2) or default_unit
+            if unit in {"千卡", "大卡"}:
+                unit = "kcal"
+            elif unit == "克":
+                unit = "g"
+            else:
+                unit = unit.lower()
+            result[key] = {"label": label, "value": value, "unit": unit}
+        return result
+
+    @staticmethod
+    def _strip_nutrition_section_from_ai_text(text: str) -> str:
+        """删除 AI 原文末尾的营养成分段，避免和图形化展示重复。"""
+        if not text:
+            return ""
+
+        heading = re.search(
+            r"(?im)^\s{0,3}#{0,6}\s*营养成分[^\n]*\n?",
+            text,
+        )
+        if not heading:
+            return text.strip()
+
+        tail = text[heading.end():]
+        next_heading = re.search(r"(?m)^\s{0,3}#{1,6}\s+\S+", tail)
+        end = heading.end() + next_heading.start() if next_heading else len(text)
+        cleaned = (text[: heading.start()] + text[end:]).strip()
+        return cleaned or text.strip()
+
+    def _build_ai_nutrition_html(self, nutrition: dict) -> str:
+        if not nutrition:
+            return ""
+
+        macro_items = [
+            ("protein", "#0d9488"),
+            ("carbs", "#f59e0b"),
+            ("fat", "#ef4444"),
+        ]
+        max_macro = max(
+            [nutrition[k]["value"] for k, _color in macro_items if k in nutrition]
+            or [1]
+        )
+
+        cards = []
+        if "calories" in nutrition:
+            item = nutrition["calories"]
+            cards.append(
+                "<td style='padding:8px;'>"
+                "<div style='border-radius:12px; background:#ecfeff; padding:12px; border:1px solid #99f6e4;'>"
+                "<div style='font-size:13px; color:#0f766e; font-weight:700;'>总热量</div>"
+                f"<div style='font-size:22px; color:#0f172a; font-weight:800;'>{item['value']:g} {item['unit']}</div>"
+                "</div></td>"
+            )
+        for key, color in macro_items:
+            if key not in nutrition:
+                continue
+            item = nutrition[key]
+            cards.append(
+                "<td style='padding:8px;'>"
+                "<div style='border-radius:12px; background:#f8fafc; padding:12px; border:1px solid #e2e8f0;'>"
+                f"<div style='font-size:13px; color:{color}; font-weight:700;'>{item['label']}</div>"
+                f"<div style='font-size:22px; color:#0f172a; font-weight:800;'>{item['value']:g} {item['unit']}</div>"
+                "</div></td>"
+            )
+
+        bars = []
+        bar_units = 24
+        for key, color in macro_items:
+            if key not in nutrition:
+                continue
+            item = nutrition[key]
+            filled_units = 0
+            if item["value"] > 0:
+                filled_units = max(1, round(item["value"] / max_macro * bar_units))
+            filled_units = min(bar_units, filled_units)
+            empty_units = bar_units - filled_units
+            bar_html = (
+                f"<span style='color:{color}; font-family:Consolas, monospace;'>"
+                f"{'█' * filled_units}</span>"
+                f"<span style='color:#cbd5e1; font-family:Consolas, monospace;'>"
+                f"{'░' * empty_units}</span>"
+            )
+            bars.append(
+                "<tr>"
+                f"<td style='width:68px; padding:6px 8px; color:#334155; font-weight:700;'>{item['label']}</td>"
+                f"<td style='padding:6px 8px; font-size:16px;'>{bar_html}</td>"
+                f"<td style='width:72px; padding:6px 8px; color:#475569;'>{item['value']:g} {item['unit']}</td>"
+                "</tr>"
+            )
+
+        return (
+            "<hr style='border:none; border-top:1px solid #e2e8f0; margin:16px 0;'>"
+            "<h3 style='color:#0d9488; margin:8px 0;'>营养价值图示</h3>"
+            "<p style='color:#64748b; margin:4px 0 10px 0;'>根据 AI 生成的估算营养成分自动提取，供家庭参考。</p>"
+            "<table style='width:100%; border-collapse:collapse;'><tr>"
+            + "".join(cards)
+            + "</tr></table>"
+            "<table style='width:100%; border-collapse:collapse; margin-top:8px;'>"
+            + "".join(bars)
+            + "</table>"
         )
 
     def show_recipe_detail(self, item):
@@ -1092,6 +1249,22 @@ class MainWindow(QTabWidget):
         self.knowledge_content = QTextEdit()
         self.knowledge_content.setReadOnly(True)
         self.knowledge_content.setPlaceholderText("选择左侧分类，查看饮食知识。")
+
+        self.knowledge_search_edit = QLineEdit()
+        self.knowledge_search_edit.setPlaceholderText("输入食材名，如 鸡蛋 / 番茄 / 牛肉")
+        self.knowledge_search_edit.returnPressed.connect(self.search_food_shelf_life)
+        self.btn_knowledge_search = QPushButton("AI 查询保质期")
+        self.btn_knowledge_search.setObjectName("primaryBtn")
+        self.btn_knowledge_search.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_knowledge_search.clicked.connect(self.search_food_shelf_life)
+        self.knowledge_search_status = QLabel("")
+        self.knowledge_search_status.setObjectName("pageSubtitle")
+
+        search_row = QHBoxLayout()
+        search_row.setSpacing(8)
+        search_row.addWidget(self.knowledge_search_edit, 1)
+        search_row.addWidget(self.btn_knowledge_search)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.knowledge_nav)
         splitter.addWidget(self.knowledge_content)
@@ -1112,6 +1285,8 @@ class MainWindow(QTabWidget):
         layout.setSpacing(12)
         layout.addWidget(label)
         layout.addWidget(knowledge_subtitle)
+        layout.addLayout(search_row)
+        layout.addWidget(self.knowledge_search_status)
         layout.addWidget(knowledge_card, 1)
         self.knowledge_tab.setLayout(layout)
         self.addTab(self.knowledge_tab, "饮食知识")
@@ -1125,6 +1300,68 @@ class MainWindow(QTabWidget):
         self.knowledge_content.setHtml(
             f"<h3 style='color:#0d9488; margin-top:0;'>{key}</h3>"
             f"<p style='line-height:1.8; color:#475569;'>{self.knowledge_books.get(key, '').replace(chr(10), '<br>')}</p>"
+        )
+
+    def search_food_shelf_life(self):
+        food_name = self.knowledge_search_edit.text().strip()
+        if not food_name:
+            QMessageBox.information(self, "提示", "请输入要查询的食材名称。")
+            return
+
+        self.btn_knowledge_search.setEnabled(False)
+        self.knowledge_search_status.setText("AI 正在查询，请稍候...")
+        self.knowledge_content.setPlainText(f"正在查询「{food_name}」的保质期和保存建议...")
+
+        def task():
+            from fallback.llm import get_llm
+
+            llm = get_llm()
+            return llm.generate(
+                self._build_shelf_life_prompt(food_name),
+                system=(
+                    "你是家庭食材保存顾问，回答要简洁、实用、适合家庭冰箱管理。"
+                    "如果不同品牌、包装或保存环境会影响保质期，请明确提醒。"
+                ),
+                max_tokens=512,
+            )
+
+        worker = Worker(task)
+        worker.signals.result.connect(
+            lambda text, name=food_name: self._on_shelf_life_ready(name, text)
+        )
+        worker.signals.error.connect(self._on_shelf_life_error)
+        worker.signals.finished.connect(
+            lambda: self.btn_knowledge_search.setEnabled(True)
+        )
+        self.thread_pool.start(worker)
+
+    @staticmethod
+    def _build_shelf_life_prompt(food_name: str) -> str:
+        return (
+            f"请查询食材「{food_name}」的家庭保存与保质期建议。"
+            "请按以下结构回答：\n"
+            "1. 常温、冷藏、冷冻的大致保质期；\n"
+            "2. 最推荐的保存方式；\n"
+            "3. 变质/不宜食用的判断方法；\n"
+            "4. 家庭使用注意事项。\n"
+            "回答要用中文，简洁但具体。"
+        )
+
+    def _on_shelf_life_ready(self, food_name: str, text: str):
+        self.knowledge_search_status.setText("查询完成")
+        self.knowledge_content.setHtml(
+            f"<h3 style='color:#0d9488; margin-top:0;'>「{self._escape_html(food_name)}」保质期查询</h3>"
+            f"<pre style='white-space:pre-wrap; font-family:Microsoft YaHei, sans-serif;"
+            f" line-height:1.7; color:#475569;'>{self._escape_html(text)}</pre>"
+            "<p style='color:#94a3b8; font-size:12px;'>提示：AI 回答仅供家庭参考，请以包装标识和实际气味、颜色、质地为准。</p>"
+        )
+
+    def _on_shelf_life_error(self, message: str):
+        self.knowledge_search_status.setText("查询失败")
+        self.knowledge_content.setPlainText(
+            "AI 查询失败："
+            f"{message}\n\n"
+            "请确认本地模型已下载，或配置 DEEPSEEK_API_KEY 后重启程序。"
         )
 
     def _parse_exclude_ingredients(self) -> set:
@@ -1195,66 +1432,136 @@ class MainWindow(QTabWidget):
             self.llm_status_label.setText(f"状态未知：{e}")
 
     def init_stats_tab(self) -> None:
+        import matplotlib
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
         from matplotlib.figure import Figure
 
+        matplotlib.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode MS"]
+        matplotlib.rcParams["axes.unicode_minus"] = False
+
         self.stats_tab = QWidget()
-        self.stats_figure = Figure(figsize=(8, 4))
+        self.stats_figure = Figure(figsize=(9, 4))
         self.stats_canvas = FigureCanvas(self.stats_figure)
 
         btn_refresh = QPushButton("刷新图表")
         btn_refresh.setObjectName("primaryBtn")
-        btn_refresh.clicked.connect(self._update_stats_charts)
+        btn_refresh.clicked.connect(self.refresh_stats_view)
+
+        self.stats_summary_label = QLabel("暂无食材数据")
+        self.stats_summary_label.setObjectName("pageSubtitle")
+        self.stats_summary_label.setWordWrap(True)
+
+        self.stats_table = QTableWidget()
+        self.stats_table.setColumnCount(8)
+        self.stats_table.setHorizontalHeaderLabels(
+            ["食材", "库存数量", "估算重量(g)", "热量(kcal)", "蛋白质(g)", "碳水(g)", "脂肪(g)", "备注"]
+        )
+        self.stats_table.setShowGrid(False)
+        self.stats_table.setAlternatingRowColors(True)
+        self.stats_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.stats_table.verticalHeader().setVisible(False)
+        stats_header = self.stats_table.horizontalHeader()
+        stats_header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        for col in range(7):
+            stats_header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        stats_header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
 
         layout = QVBoxLayout(self.stats_tab)
         title = QLabel("数据统计")
         title.setObjectName("pageTitle")
-        subtitle = QLabel("营养成分占比（当前选中菜谱）· 冰箱食材分类统计")
+        subtitle = QLabel("基于当前冰箱库存估算总热量、蛋白质、碳水和脂肪")
         subtitle.setObjectName("pageSubtitle")
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(btn_refresh)
+        btn_row.addStretch()
+
         layout.addWidget(title)
         layout.addWidget(subtitle)
-        layout.addWidget(btn_refresh)
+        layout.addLayout(btn_row)
+        layout.addWidget(self.stats_summary_label)
         layout.addWidget(self.stats_canvas, 1)
+        layout.addWidget(self.stats_table, 1)
         self.addTab(self.stats_tab, "数据统计")
-        self._update_stats_charts()
+        self.refresh_stats_view()
 
-    def _update_stats_charts(self) -> None:
+    def refresh_stats_view(self) -> None:
         if not hasattr(self, "stats_figure"):
             return
+        summary = summarize_pantry_nutrition(self.ingredients)
+        self._update_stats_summary(summary)
+        self._update_stats_table(summary)
+        self._update_stats_charts(summary)
+
+    def _update_stats_summary(self, summary: dict) -> None:
+        totals = summary["totals"]
+        if not summary["rows"]:
+            self.stats_summary_label.setText("暂无冰箱食材，请先在「食材管理」中添加食材。")
+            return
+        self.stats_summary_label.setText(
+            "当前库存估算："
+            f"总重量 {totals['grams']:.1f} g，"
+            f"总热量 {totals['calories']:.1f} kcal，"
+            f"蛋白质 {totals['protein']:.1f} g，"
+            f"碳水 {totals['carbs']:.1f} g，"
+            f"脂肪 {totals['fat']:.1f} g。"
+            f"已识别 {summary['recognized_count']} 种，"
+            f"未识别 {summary['unrecognized_count']} 种。"
+        )
+
+    def _update_stats_table(self, summary: dict) -> None:
+        rows = summary["rows"]
+        self.stats_table.setRowCount(len(rows))
+        for row_idx, row in enumerate(rows):
+            values = [
+                row["name"],
+                row["amount_display"],
+                f"{row['grams']:.1f}",
+                f"{row['calories']:.1f}",
+                f"{row['protein']:.1f}",
+                f"{row['carbs']:.1f}",
+                f"{row['fat']:.1f}",
+                row["note"] or "已按本地营养表估算",
+            ]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if col == 7:
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                self.stats_table.setItem(row_idx, col, item)
+
+    def _update_stats_charts(self, summary: dict) -> None:
         self.stats_figure.clear()
+
         ax1 = self.stats_figure.add_subplot(1, 2, 1)
-        recipe = self._get_selected_recipe() or self._active_recipe_for_cooking
-        nutrition = (recipe or {}).get("nutrition") if recipe else None
-        if isinstance(nutrition, dict) and nutrition:
-            labels = []
-            sizes = []
-            for key, label in [
-                ("calories", "热量"),
-                ("protein", "蛋白质"),
-                ("carbs", "碳水"),
-                ("fat", "脂肪"),
-            ]:
-                val = nutrition.get(key)
-                if val is not None and float(val) > 0:
-                    labels.append(label)
-                    sizes.append(float(val))
+        totals = summary["totals"]
+        macro_calories = [
+            totals["protein"] * 4,
+            totals["carbs"] * 4,
+            totals["fat"] * 9,
+        ]
+        labels = ["蛋白质", "碳水", "脂肪"]
+        if sum(macro_calories) > 0:
+            ax1.pie(macro_calories, labels=labels, autopct="%1.0f%%", startangle=90)
         else:
-            labels = ["蛋白质", "碳水", "脂肪", "其他"]
-            sizes = [25, 45, 20, 10]
-        ax1.pie(sizes, labels=labels, autopct="%1.0f%%", startangle=90)
-        ax1.set_title("营养占比（示意）")
+            ax1.text(0.5, 0.5, "暂无可统计营养数据", ha="center", va="center")
+            ax1.set_axis_off()
+        ax1.set_title("三大营养素热量占比")
 
         ax2 = self.stats_figure.add_subplot(1, 2, 2)
-        categories = {}
-        for item in self.ingredients:
-            cat = item.get("category") or "未分类"
-            categories[cat] = categories.get(cat, 0) + 1
-        if not categories:
-            categories = {"暂无食材": 0}
-        cats = list(categories.keys())
-        counts = list(categories.values())
-        ax2.bar(cats, counts, color="#0d9488")
-        ax2.set_title("冰箱食材分类数量")
+        calorie_rows = [
+            row for row in summary["rows"] if row["calories"] > 0
+        ]
+        calorie_rows.sort(key=lambda r: r["calories"], reverse=True)
+        top_rows = calorie_rows[:8]
+        if top_rows:
+            names = [row["name"] for row in top_rows]
+            values = [row["calories"] for row in top_rows]
+            ax2.bar(names, values, color="#0d9488")
+            ax2.set_ylabel("kcal")
+        else:
+            ax2.text(0.5, 0.5, "暂无热量数据", ha="center", va="center")
+            ax2.set_axis_off()
+        ax2.set_title("食材热量贡献 Top 8")
         ax2.tick_params(axis="x", rotation=30)
         self.stats_figure.tight_layout()
         self.stats_canvas.draw()
