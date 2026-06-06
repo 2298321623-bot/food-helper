@@ -36,7 +36,15 @@ def init_db():
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS users(
                    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                   username TEXT NOT NULL UNIQUE) ''')
+                   username TEXT NOT NULL UNIQUE
+                   password TEXT NOT NULL,
+                   role TEXT NOT NULL DEFAULT 'user') ''')
+    
+    #插入默认管理员
+    cursor.execute('''
+    INSERT OR IGNORE INTO users(username,password,role) 
+    VALUES('admin','123456','admin');
+    ''')
 
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS ingredients(
@@ -165,15 +173,24 @@ def add_user(username, pwd):
     try:
         conn = connect_db()
         cursor = conn.cursor()
-        sql = "INSERT INTO users(username,password) VALUES (?,?)"
-        cursor.execute(sql, (username, pwd))
+        cursor.execute("INSERT INTO users(username,password,role) VALUES(?,?,?)",(username,pwd,"user"))
         conn.commit()
         return True   # 注册成功
     except Exception:
-        conn.rollback()
         return False  # 失败：用户名重复/数据库报错
     finally:
         conn.close()
+
+#登录验证
+def check_login(username,pwd):
+    conn=sqlite3.connect("xxx.db")
+    cur=conn.cursor()
+    res=cur.execute("select role from users where username=? and password=?",(username,pwd)).fetchone()
+    conn.close()
+    if res:
+        return res[0] #匹配成功返回 admin / user
+    else:
+        return None #账号密码错误
 
 #查找用户
 def get_user(username):
