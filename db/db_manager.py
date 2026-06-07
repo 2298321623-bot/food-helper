@@ -36,7 +36,15 @@ def init_db():
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS users(
                    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                   username TEXT NOT NULL UNIQUE) ''')
+                   username TEXT NOT NULL UNIQUE
+                   password TEXT NOT NULL,
+                   role TEXT NOT NULL DEFAULT 'user') ''')
+    
+    #插入默认管理员
+    cursor.execute('''
+    INSERT OR IGNORE INTO users(username,password,role) 
+    VALUES('admin','123456','admin');
+    ''')
 
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS ingredients(
@@ -88,6 +96,17 @@ def init_db():
                    FOREIGN KEY (user_id) REFERENCES users(id),
                    FOREIGN KEY (recipe_id) REFERENCES recipes(recipe_id)
                    )''')
+    
+    # 日志表：操作记录
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS operation_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT,           # 谁操作的
+        operate_type TEXT,       # 操作类型：登录/新增/修改/删除/注册
+        content TEXT,            # 操作内容
+        create_time TIMESTAMP DEFAULT (datetime('now','localtime'))
+    )
+    ''')
     
     conn.commit()
     conn.close()
@@ -165,15 +184,26 @@ def add_user(username, pwd):
     try:
         conn = connect_db()
         cursor = conn.cursor()
-        sql = "INSERT INTO users(username,password) VALUES (?,?)"
-        cursor.execute(sql, (username, pwd))
+        cursor.execute("INSERT INTO users(username,password,role) VALUES(?,?,?)",(username,pwd,"user"))
         conn.commit()
+        add_log(username, "用户注册", "新用户注册")
         return True   # 注册成功
     except Exception:
-        conn.rollback()
         return False  # 失败：用户名重复/数据库报错
     finally:
         conn.close()
+
+#登录验证
+def check_login(username,pwd):
+    conn = connect_db()
+    cur = conn.cursor()
+    res=cur.execute("select role from users where username=? and password=?",(username,pwd)).fetchone()
+    conn.close()
+    if res:
+        add_log(username, "登录", "用户登录系统")
+        return res[0] #匹配成功返回 admin / user
+    else:
+        return None #账号密码错误
 
 #查找用户
 def get_user(username):
@@ -243,6 +273,7 @@ def add_ingredient(name, category, quantity, unit, expire_date, user_id):
         VALUES (?,?,?,?,?,?)
         ''', (name, category, quantity, unit, expire_date, user_id))
         conn.commit()
+        add_log(user_id, "新增食材", f"食材：{name}")
         return True
     except:
         conn.rollback()
@@ -268,12 +299,17 @@ def get_ingredients(user_id):
         return data
 
 #修改食材
-def update_ingredient(id, new_quantity):
+def update_ingredient(id, name, category, quantity, unit, expire_date, user_id):
     try:
         conn = connect_db()
         c = conn.cursor()
-        c.execute("UPDATE ingredients SET quantity=? WHERE id=?", (new_quantity, id))
+        c.execute('''
+        UPDATE ingredients 
+        SET name=?, category=?, quantity=?, unit=?, expire_date=?
+        WHERE id=?
+        ''', (name, category, quantity, unit, expire_date, id))
         conn.commit()
+        add_log(user_id, "修改食材", f"修改ID:{id}，名称：{name}")
         return True  # 成功
     except Exception as e:
         # 出错了！打印错误，数据库回滚（撤销操作）
@@ -284,12 +320,13 @@ def update_ingredient(id, new_quantity):
         conn.close()
 
 #删除食材
-def delete_ingredient(id):
+def delete_ingredient(id, user_id):
     try:
         conn = connect_db()
         c = conn.cursor()
         c.execute("DELETE FROM ingredients WHERE id=?", (id,))
         conn.commit()
+        add_log(user_id, "删除食材", f"删除食材ID：{id}")
         return True  # 成功
     except Exception as e:
         # 出错了！打印错误，数据库回滚（撤销操作）
@@ -471,3 +508,27 @@ def get_remain_days(expire_date_str):
     expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d").date()
     remain_days = (expire_date - today).days  # 剩余天数
     return remain_days
+
+# 添加日志（所有操作都会调用这个）
+def add_log(username, operate_type, content):
+    try:
+        conn = sqlite3.connect("food.db")
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT INTO operation_log (username, operate_type, content)
+            VALUES (?, ?, ?)
+        ''', (username, operate_type, content))
+        conn.commit()
+    except:
+        pass
+    finally:
+        conn.close()
+
+def get_all_logs():
+    conn = connect_db()
+    c = conn.cursor()
+    # 查询整张日志表所有数据
+    c.execute("SELECT * FROM operation_log ORDER BY create_time DESC")
+    res = c.fetchall()
+    conn.close()
+    return res
