@@ -320,33 +320,3 @@ class LocalLLM(BaseLLM):
 
         yield text
 
-
-
-    def generate_recipe(
-
-        self,
-
-        user_ingredients,
-
-        reference_hint: str = "",
-
-        extra_requirements: str = "",
-
-        recipe_name: str = "",
-
-    ) -> str:
-
-        user_prompt = build_recipe_user_prompt(
-
-            user_ingredients,
-
-            reference_hint=reference_hint,
-
-            extra_requirements=extra_requirements,
-
-            recipe_name=recipe_name,
-
-        )
-
-        return self.generate(user_prompt, system=RECIPE_SYSTEM_PROMPT)
-

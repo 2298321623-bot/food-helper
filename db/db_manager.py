@@ -36,7 +36,7 @@ def init_db():
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS users(
                    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                   username TEXT NOT NULL UNIQUE
+                   username TEXT NOT NULL UNIQUE,
                    password TEXT NOT NULL,
                    role TEXT NOT NULL DEFAULT 'user') ''')
     
@@ -101,16 +101,157 @@ def init_db():
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS operation_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT,           # 谁操作的
-        operate_type TEXT,       # 操作类型：登录/新增/修改/删除/注册
-        content TEXT,            # 操作内容
+        username TEXT,
+        operate_type TEXT,
+        content TEXT,
         create_time TIMESTAMP DEFAULT (datetime('now','localtime'))
     )
     ''')
     
     conn.commit()
     conn.close()
-    print("✅ 全部数据表初始化完成")
+    print("[OK] 全部数据表初始化完成")
+
+
+# ============================================================
+# 用户认证 / 操作日志：基础必做功能补充
+# ============================================================
+import hashlib
+import secrets
+
+
+def _hash_password(password: str, salt: str) -> str:
+    """SHA-256(salt + password)，避免明文存储。"""
+    return hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
+
+
+def _is_legacy_plain(stored: str) -> bool:
+    """老的明文密码（如初始化的 admin/123456）走 fallback 比对。"""
+    return "$" not in stored
+
+
+def register_user(username: str, password: str, role: str = "user") -> tuple[bool, str]:
+    """注册新用户。返回 (ok, message)。"""
+    username = (username or "").strip()
+    if not username or not password:
+        return False, "用户名和密码不能为空"
+    if len(password) < 4:
+        return False, "密码至少 4 位"
+    salt = secrets.token_hex(8)
+    stored = f"{salt}${_hash_password(password, salt)}"
+    try:
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO users(username, password, role) VALUES (?, ?, ?)",
+            (username, stored, role),
+        )
+        conn.commit()
+        conn.close()
+        return True, "注册成功"
+    except sqlite3.IntegrityError:
+        return False, "该用户名已被占用"
+    except Exception as e:
+        return False, f"注册失败：{e}"
+
+
+def verify_user(username: str, password: str) -> dict | None:
+    """登录校验，成功返回 {user_id, username, role}，失败返回 None。"""
+    username = (username or "").strip()
+    if not username or not password:
+        return None
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT user_id, username, password, role FROM users WHERE username=?",
+        (username,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    user_id, uname, stored, role = row
+    if _is_legacy_plain(stored):
+        # 兼容 init_db 中插入的明文 admin
+        if stored == password:
+            return {"user_id": user_id, "username": uname, "role": role}
+        return None
+    try:
+        salt, hashed = stored.split("$", 1)
+    except ValueError:
+        return None
+    if _hash_password(password, salt) == hashed:
+        return {"user_id": user_id, "username": uname, "role": role}
+    return None
+
+
+def change_password(username: str, old_password: str, new_password: str) -> tuple[bool, str]:
+    """修改密码。需提供旧密码校验。"""
+    if not new_password or len(new_password) < 4:
+        return False, "新密码至少 4 位"
+    user = verify_user(username, old_password)
+    if not user:
+        return False, "旧密码不正确"
+    salt = secrets.token_hex(8)
+    stored = f"{salt}${_hash_password(new_password, salt)}"
+    try:
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET password=? WHERE username=?",
+            (stored, username),
+        )
+        conn.commit()
+        conn.close()
+        return True, "密码修改成功"
+    except Exception as e:
+        return False, f"修改失败：{e}"
+
+
+def log_operation(username: str, operate_type: str, content: str = "") -> None:
+    """写入一条操作日志。异常自动吞掉，避免影响主流程。"""
+    try:
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO operation_log(username, operate_type, content) VALUES (?, ?, ?)",
+            (username or "anonymous", operate_type, content[:500]),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def fetch_operation_logs(limit: int = 200, username: str | None = None) -> list[tuple]:
+    """读取最近的操作日志，可按用户名过滤。"""
+    conn = connect_db()
+    cursor = conn.cursor()
+    if username:
+        cursor.execute(
+            "SELECT create_time, username, operate_type, content FROM operation_log "
+            "WHERE username=? ORDER BY id DESC LIMIT ?",
+            (username, limit),
+        )
+    else:
+        cursor.execute(
+            "SELECT create_time, username, operate_type, content FROM operation_log "
+            "ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def list_users() -> list[tuple]:
+    """管理员查看：所有用户。"""
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id, username, role FROM users ORDER BY user_id")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
 
 def import_recipes_with_embedding(json_path="data.json"):
     # 1. 加载数据
@@ -159,7 +300,7 @@ def import_recipes_from_json():
         with open("data.json", "r", encoding="utf-8") as f:
             raw = f.read()
     except:
-        print("❌ 无法打开 data.json")
+        print("[ERROR] 无法打开 data.json")
         return
 
     data = json.loads(raw)
@@ -497,7 +638,7 @@ def recommend_recipes(user_id=1, top_n=5):
 
 # 展示推荐结果
 def show_recommend(user_id=1):
-    print("\n==== 🍲 智能食谱推荐（仅 Numpy） ====")
+    print("\n==== 智能食谱推荐（仅 Numpy） ====")
     data = recommend_recipes(user_id)
     for i, (score, name, ings) in enumerate(data, 1):
         print(f"{i}. {name} | 匹配度：{score:.1%}")
