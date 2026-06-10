@@ -114,9 +114,61 @@ def _load_existing() -> List[Dict]:
         return []
 
 
+TRAIN_JSONL = Path(__file__).resolve().parent / "data_train.jsonl"
+
+
 def _save(records: List[Dict]) -> None:
+    """保存菜谱 JSON，并同步生成 LLM 训练用的 JSONL 文件。
+
+    JSONL 格式（指令微调风格）：
+        {"instruction": "...", "input": "...", "output": "..."}
+    每行一个 JSON 对象，适合 Alpaca / LLaMA-Factory 等微调框架直接读取。
+    """
     with open(DATA_JSON, "w", encoding="utf-8") as f:
         json.dump(records, f, ensure_ascii=False, indent=2)
+    _export_train_jsonl(records)
+
+
+def _export_train_jsonl(records: List[Dict]) -> None:
+    """将菜谱数据转换为指令微调 JSONL 训练格式并写出。
+
+    格式示例：
+        instruction: "请根据给出的食材，写出一道完整菜谱。"
+        input: "食材：鸡蛋、番茄"
+        output: "番茄炒蛋\\n步骤1：..."
+    """
+    try:
+        with open(TRAIN_JSONL, "w", encoding="utf-8") as f:
+            for r in records:
+                name = r.get("name", "").strip()
+                ings = r.get("ingredients") or []
+                if isinstance(ings, str):
+                    try:
+                        ings = json.loads(ings)
+                    except Exception:
+                        ings = [ings]
+                steps = r.get("steps") or []
+                if isinstance(steps, str):
+                    try:
+                        steps = json.loads(steps)
+                    except Exception:
+                        steps = [steps]
+                if not name or not ings:
+                    continue
+                food_list = "、".join(str(i) for i in ings if i)
+                steps_text = "\n".join(
+                    f"步骤{idx + 1}：{s}" for idx, s in enumerate(steps) if s
+                ) or "（详细步骤请参考实际烹饪）"
+                output_text = f"【{name}】\n食材：{food_list}\n{steps_text}"
+                entry = {
+                    "instruction": "请根据给出的食材，写出一道完整的菜谱，包含菜名和烹饪步骤。",
+                    "input": f"食材：{food_list}",
+                    "output": output_text,
+                }
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        logger.info("训练 JSONL 已写出 -> %s（%d 条）", TRAIN_JSONL, len(records))
+    except Exception as e:
+        logger.warning("生成训练 JSONL 失败：%s", e)
 
 
 def run(pages: int = 3, progress_cb: Callable[[str], None] | None = None) -> Dict:

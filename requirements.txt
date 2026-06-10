@@ -9,3 +9,6 @@ matplotlib==3.8.4
 pyinstaller==6.4.0
 SpeechRecognition>=3.10.0
 PyAudio>=0.2.14
+pyttsx3>=2.90
+pandas>=2.0.0
+openpyxl>=3.1.0

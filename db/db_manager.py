@@ -40,11 +40,16 @@ def init_db():
                    password TEXT NOT NULL,
                    role TEXT NOT NULL DEFAULT 'user') ''')
     
-    #插入默认管理员
-    cursor.execute('''
-    INSERT OR IGNORE INTO users(username,password,role) 
-    VALUES('admin','123456','admin');
-    ''')
+    # 插入默认管理员（如不存在）；密码使用 SHA-256+salt 安全存储
+    cursor.execute("SELECT user_id FROM users WHERE username='admin'")
+    if cursor.fetchone() is None:
+        import hashlib as _hl, secrets as _sec
+        _salt = _sec.token_hex(8)
+        _hashed = _hl.sha256((_salt + "123456").encode()).hexdigest()
+        cursor.execute(
+            "INSERT INTO users(username,password,role) VALUES('admin',?,'admin')",
+            (f"{_salt}${_hashed}",),
+        )
 
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS ingredients(

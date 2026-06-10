@@ -175,9 +175,16 @@ class MainWindow(QTabWidget):
         QApplication.quit()
 
     def _on_main_tab_changed(self, index: int):
-        if 0 <= index < self.count() and self.widget(index) is self.recipe_tab:
+        if index < 0 or index >= self.count():
+            return
+        widget = self.widget(index)
+        if widget is self.recipe_tab:
             if self.mode_box.currentText() == "用现有食材做":
                 self._refresh_ingredient_picker()
+        elif hasattr(self, "stats_tab") and widget is self.stats_tab:
+            self.refresh_stats_view()
+        elif hasattr(self, "admin_tab") and widget is self.admin_tab:
+            self.refresh_admin_view()
 
     def _on_recipe_mode_changed(self, mode: str):
         use_pantry = mode == "用现有食材做"
@@ -251,6 +258,28 @@ class MainWindow(QTabWidget):
         self.btn_remove_ingredient.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_remove_ingredient.clicked.connect(self.remove_selected_ingredient)
 
+        self.btn_clear_fridge = QPushButton("🍳 一键清冰箱菜谱")
+        self.btn_clear_fridge.setObjectName("secondaryBtn")
+        self.btn_clear_fridge.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear_fridge.setToolTip("基于临期食材，AI 自动生成「清冰箱」菜谱")
+        self.btn_clear_fridge.clicked.connect(self.generate_clear_fridge_recipe)
+
+        self.btn_fridge_zones = QPushButton("🧊 分区视图")
+        self.btn_fridge_zones.setObjectName("ghostBtn")
+        self.btn_fridge_zones.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_fridge_zones.setToolTip("按冷藏/冷冻/常温查看食材分布")
+        self.btn_fridge_zones.clicked.connect(self.show_fridge_zones_dialog)
+
+        self.btn_import_excel = QPushButton("📥 导入 Excel")
+        self.btn_import_excel.setObjectName("ghostBtn")
+        self.btn_import_excel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_import_excel.clicked.connect(self.import_ingredients_excel)
+
+        self.btn_export_excel = QPushButton("📤 导出 Excel")
+        self.btn_export_excel.setObjectName("ghostBtn")
+        self.btn_export_excel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_export_excel.clicked.connect(self.export_ingredients_excel)
+
         title_label = QLabel("食材管理中心")
         title_label.setObjectName("pageTitle")
         subtitle = QLabel("管理冰箱库存，关注保质期提醒")
@@ -263,7 +292,11 @@ class MainWindow(QTabWidget):
         toolbar_layout.setSpacing(8)
         toolbar_layout.addWidget(self.btn_add_ingredient)
         toolbar_layout.addWidget(self.btn_remove_ingredient)
+        toolbar_layout.addWidget(self.btn_clear_fridge)
+        toolbar_layout.addWidget(self.btn_fridge_zones)
         toolbar_layout.addStretch()
+        toolbar_layout.addWidget(self.btn_import_excel)
+        toolbar_layout.addWidget(self.btn_export_excel)
 
         table_card = QFrame()
         table_card.setObjectName("contentCard")
@@ -530,7 +563,298 @@ class MainWindow(QTabWidget):
                 message_parts.append("已过期食材：\n" + "\n".join(expired))
             if soon:
                 message_parts.append("即将过期食材：\n" + "\n".join(soon))
-            QMessageBox.warning(self, "保质期提醒", "\n\n".join(message_parts))
+            # 改用带"一键清冰箱"按钮的对话框
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("保质期提醒")
+            box.setText("\n\n".join(message_parts))
+            btn_clear = box.addButton("🍳 立即生成清冰箱菜谱", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton("稍后处理", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is btn_clear:
+                self.generate_clear_fridge_recipe()
+
+    # ====================== 创新点：一键清冰箱菜谱 ======================
+    def _get_near_expiry_ingredients(self, days: int = 5) -> list[dict]:
+        """返回剩余天数 <= days 的食材（含已过期）。"""
+        now = datetime.now().date()
+        result = []
+        for item in self.ingredients:
+            try:
+                days_left = (item["expiry"] - now).days
+            except Exception:
+                continue
+            if days_left <= days:
+                result.append(item)
+        return result
+
+    def generate_clear_fridge_recipe(self) -> None:
+        """基于临期食材调用 LLM 生成「清冰箱」菜谱，跳转到食谱页展示。"""
+        near = self._get_near_expiry_ingredients(days=5)
+        if not near:
+            QMessageBox.information(
+                self, "清冰箱菜谱", "目前没有临期食材，冰箱状态良好 👍"
+            )
+            return
+        names = [it["name"] for it in near]
+        # 切到菜谱页，复用现有 AI 生成流程
+        self.setCurrentWidget(self.recipe_tab)
+        self.mode_box.setCurrentText("用现有食材做")
+        self._on_recipe_mode_changed("用现有食材做")
+        # 仅勾选临期食材
+        if hasattr(self, "ingredient_pick_list"):
+            for i in range(self.ingredient_pick_list.count()):
+                it = self.ingredient_pick_list.item(i)
+                pick_name = it.data(Qt.ItemDataRole.UserRole)
+                it.setCheckState(
+                    Qt.CheckState.Checked if pick_name in names else Qt.CheckState.Unchecked
+                )
+        # 临时设置"额外要求"提示词
+        if hasattr(self, "exclude_edit"):
+            self.exclude_edit.setText("")
+        self.recipe_detail.setPlainText(
+            f"🍳 正在为临期食材生成清冰箱菜谱：{', '.join(names)}…\n"
+            "AI 思考中，请稍候。"
+        )
+        self._log_op("清冰箱菜谱", f"基于 {len(names)} 种临期食材")
+        # 直接调用生成
+        self.generate_recipe_list()
+
+    # ====================== 创新点：冰箱分区可视化 ======================
+    def show_fridge_zones_dialog(self) -> None:
+        """按 location 字段把食材分为 冷冻/冷藏/常温/其他 四区展示。"""
+        zones: dict[str, list[dict]] = {
+            "❄️ 冷冻区": [],
+            "🧊 冷藏区": [],
+            "🌡️ 常温区": [],
+            "❓ 未分类": [],
+        }
+        for item in self.ingredients:
+            loc = (item.get("location") or "").strip()
+            if any(k in loc for k in ("冻", "freeze", "Freezer")):
+                zones["❄️ 冷冻区"].append(item)
+            elif any(k in loc for k in ("藏", "冰箱", "Fridge", "保鲜")):
+                zones["🧊 冷藏区"].append(item)
+            elif any(k in loc for k in ("常温", "橱", "柜", "Pantry", "干燥")):
+                zones["🌡️ 常温区"].append(item)
+            else:
+                zones["❓ 未分类"].append(item)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("冰箱分区视图")
+        dlg.setMinimumSize(720, 480)
+        layout = QHBoxLayout(dlg)
+        layout.setSpacing(10)
+        for zone_name, items in zones.items():
+            card = QFrame()
+            card.setObjectName("contentCard")
+            vbox = QVBoxLayout(card)
+            vbox.setContentsMargins(12, 10, 12, 10)
+            title = QLabel(f"{zone_name}  ({len(items)})")
+            title.setObjectName("sectionLabel")
+            vbox.addWidget(title)
+            listw = QListWidget()
+            listw.setAlternatingRowColors(True)
+            now = datetime.now().date()
+            for it in items:
+                days_left = (it["expiry"] - now).days
+                tag = "⚠️" if days_left < 0 else ("🟡" if days_left <= 3 else "🟢")
+                listw.addItem(
+                    f"{tag} {it['name']}  "
+                    f"{format_amount_display(it.get('amount', 1), it.get('unit', '个'))}  "
+                    f"剩{days_left}天"
+                )
+            if not items:
+                listw.addItem("（空）")
+            vbox.addWidget(listw, 1)
+            layout.addWidget(card, 1)
+        dlg.exec()
+
+    # ====================== 创新点：Excel 导入/导出 ======================
+    def export_ingredients_excel(self) -> None:
+        """用 pandas 把冰箱食材导出为 Excel/CSV，便于备份与分享。"""
+        if not self.ingredients:
+            QMessageBox.information(self, "导出 Excel", "当前没有食材数据。")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出食材数据", "冰箱食材.xlsx", "Excel (*.xlsx);;CSV (*.csv)"
+        )
+        if not path:
+            return
+        try:
+            import pandas as pd
+            rows = []
+            for it in self.ingredients:
+                rows.append({
+                    "食材名称": it.get("name", ""),
+                    "数量": it.get("amount", 1),
+                    "单位": it.get("unit", "个"),
+                    "保质期": it["expiry"].strftime("%Y-%m-%d"),
+                    "分类": it.get("category", ""),
+                    "存放位置": it.get("location", ""),
+                })
+            df = pd.DataFrame(rows)
+            if path.lower().endswith(".csv"):
+                df.to_csv(path, index=False, encoding="utf-8-sig")
+            else:
+                try:
+                    df.to_excel(path, index=False)
+                except ImportError:
+                    # 没装 openpyxl 时降级为 CSV
+                    path = path.rsplit(".", 1)[0] + ".csv"
+                    df.to_csv(path, index=False, encoding="utf-8-sig")
+            self._log_op("导出食材", f"{len(rows)} 条 -> {path}")
+            QMessageBox.information(self, "导出成功", f"已导出 {len(rows)} 条食材到：\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", str(e))
+
+    def import_ingredients_excel(self) -> None:
+        """从 Excel/CSV 批量导入食材；列名兼容中英文。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择食材 Excel/CSV", "", "数据文件 (*.xlsx *.xls *.csv)"
+        )
+        if not path:
+            return
+        try:
+            import pandas as pd
+            from datetime import date as _date
+            if path.lower().endswith(".csv"):
+                df = pd.read_csv(path)
+            else:
+                df = pd.read_excel(path)
+            # 列名兼容映射
+            col_map = {}
+            for c in df.columns:
+                key = str(c).strip().lower()
+                if key in ("食材名称", "名称", "name"): col_map[c] = "name"
+                elif key in ("数量", "amount", "quantity"): col_map[c] = "amount"
+                elif key in ("单位", "unit"): col_map[c] = "unit"
+                elif key in ("保质期", "expiry", "expiry_date"): col_map[c] = "expiry"
+                elif key in ("分类", "category"): col_map[c] = "category"
+                elif key in ("存放位置", "位置", "location"): col_map[c] = "location"
+            df = df.rename(columns=col_map)
+            if "name" not in df.columns:
+                QMessageBox.warning(self, "导入失败", "未找到「食材名称」列")
+                return
+            # pandas 清洗：去重 + 去空
+            df = df.dropna(subset=["name"]).drop_duplicates(subset=["name"])
+            added = 0
+            for _, r in df.iterrows():
+                name = str(r["name"]).strip()
+                if not name:
+                    continue
+                try:
+                    amount = float(r.get("amount", 1) or 1)
+                except Exception:
+                    amount = 1.0
+                unit = str(r.get("unit", "个") or "个").strip()
+                category = str(r.get("category", "蔬菜") or "蔬菜").strip()
+                location = str(r.get("location", "") or "").strip()
+                expiry_str = str(r.get("expiry", "") or "").strip()
+                try:
+                    expiry = _date.fromisoformat(expiry_str[:10])
+                except Exception:
+                    expiry = _date.today()
+                entry = {
+                    "name": name, "amount": amount, "unit": unit,
+                    "expiry": expiry, "category": category, "location": location,
+                }
+                if self._user_id > 0:
+                    new_id = db_add_ingredient(
+                        self._user_id, name, amount, unit,
+                        expiry.strftime("%Y-%m-%d"), category, location,
+                    )
+                    entry["ingredient_id"] = new_id
+                self.ingredients.append(entry)
+                added += 1
+            self.refresh_ingredient_table(show_expiry_alert=False)
+            self.refresh_stats_view()
+            self._log_op("导入食材", f"{added} 条 <- {path}")
+            QMessageBox.information(self, "导入成功", f"已导入 {added} 条食材。")
+        except ImportError as e:
+            QMessageBox.warning(
+                self, "缺少依赖",
+                f"读取 Excel 需要 openpyxl：pip install openpyxl\n{e}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "导入失败", str(e))
+
+    # ====================== 创新点：菜谱步骤语音朗读 ======================
+    def toggle_speak_recipe(self) -> None:
+        """切换朗读状态：第一次点击开始朗读当前菜谱步骤，再次点击停止。"""
+        if self._tts_thread and self._tts_thread.is_alive():
+            self._stop_tts()
+            self.btn_speak_recipe.setChecked(False)
+            self.btn_speak_recipe.setText("🔊 朗读步骤")
+            return
+
+        recipe = self._get_selected_recipe()
+        if not recipe:
+            QMessageBox.information(self, "朗读步骤", "请先在左侧选择一道菜谱。")
+            self.btn_speak_recipe.setChecked(False)
+            return
+        steps = recipe.get("steps") or []
+        if not steps:
+            # 没有结构化步骤就退化为读详情区文本
+            text = self.recipe_detail.toPlainText().strip()
+            if not text:
+                QMessageBox.information(self, "朗读步骤", "当前菜谱没有可朗读的步骤内容。")
+                self.btn_speak_recipe.setChecked(False)
+                return
+            speak_text = text
+        else:
+            speak_text = f"开始烹饪 {recipe.get('name', '菜谱')}。"
+            for idx, s in enumerate(steps, 1):
+                speak_text += f"第 {idx} 步，{s}。"
+            speak_text += "烹饪步骤已读完。"
+
+        try:
+            import pyttsx3
+        except ImportError:
+            QMessageBox.warning(
+                self, "缺少依赖",
+                "朗读功能需要 pyttsx3：\npip install pyttsx3"
+            )
+            self.btn_speak_recipe.setChecked(False)
+            return
+
+        import threading
+        self.btn_speak_recipe.setText("⏹ 停止朗读")
+        self.btn_speak_recipe.setChecked(True)
+
+        def run_tts():
+            try:
+                engine = pyttsx3.init()
+                engine.setProperty("rate", 180)
+                self._tts_engine = engine
+                engine.say(speak_text)
+                engine.runAndWait()
+            except Exception as e:
+                print(f"[TTS] 朗读失败：{e}")
+            finally:
+                self._tts_engine = None
+                # 朗读完成后恢复按钮（跨线程通过单触发计时）
+                try:
+                    from PyQt6.QtCore import QTimer
+                    QTimer.singleShot(0, lambda: (
+                        self.btn_speak_recipe.setChecked(False),
+                        self.btn_speak_recipe.setText("🔊 朗读步骤"),
+                    ))
+                except Exception:
+                    pass
+
+        self._tts_thread = threading.Thread(target=run_tts, daemon=True)
+        self._tts_thread.start()
+        self._log_op("朗读菜谱", recipe.get("name", ""))
+
+    def _stop_tts(self) -> None:
+        """尽力中断 pyttsx3 朗读（部分平台不支持立即打断）。"""
+        engine = self._tts_engine
+        if engine is not None:
+            try:
+                engine.stop()
+            except Exception:
+                pass
 
     def _get_selected_recipe(self):
         current = self.recipe_list.currentItem()
@@ -777,6 +1101,16 @@ class MainWindow(QTabWidget):
         self.btn_add_recipe_shop.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_add_recipe_shop.clicked.connect(self.add_recipe_ingredients_to_shopping_list)
 
+        # 创新点：步骤朗读
+        self.btn_speak_recipe = QPushButton("🔊 朗读步骤")
+        self.btn_speak_recipe.setObjectName("ghostBtn")
+        self.btn_speak_recipe.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_speak_recipe.setToolTip("做菜不方便看屏幕？让 AI 朗读步骤（离线 TTS）")
+        self.btn_speak_recipe.setCheckable(True)
+        self.btn_speak_recipe.clicked.connect(self.toggle_speak_recipe)
+        self._tts_engine = None
+        self._tts_thread = None
+
         # —— 筛选卡（左栏） —— #
         filter_form = QFormLayout()
         filter_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -850,6 +1184,7 @@ class MainWindow(QTabWidget):
         detail_title.setObjectName("sectionLabel")
         detail_title_row.addWidget(detail_title)
         detail_title_row.addStretch()
+        detail_title_row.addWidget(self.btn_speak_recipe)
         detail_title_row.addWidget(self.btn_buy_missing)
         detail_title_row.addWidget(self.btn_add_recipe_shop)
         detail_title_row.addWidget(self.btn_mark_cooked)
@@ -1254,11 +1589,33 @@ class MainWindow(QTabWidget):
             )
 
     # (购物清单与饮食知识库选项卡直接复用精细化间距规则...)
+    # 超市动线分区映射（创新点：按动线排序，少走冤枉路）
+    SHOP_ZONE_ORDER = ["🥬 蔬果区", "🍖 肉类水产", "🥚 蛋奶冷藏", "❄️ 冷冻区", "🍚 粮油主食", "🧂 调味料", "🍪 零食饮料", "📦 其他"]
+    SHOP_ZONE_KEYWORDS = {
+        "🥬 蔬果区": ["菜", "瓜", "椒", "茄", "萝卜", "菇", "葱", "姜", "蒜", "果", "莓", "桃", "梨", "苹果", "橙", "柠檬", "香蕉"],
+        "🍖 肉类水产": ["肉", "排", "鸡", "鸭", "牛", "猪", "羊", "鱼", "虾", "蟹", "贝"],
+        "🥚 蛋奶冷藏": ["蛋", "奶", "酸奶", "芝士", "黄油", "豆腐"],
+        "❄️ 冷冻区": ["冻", "冰", "雪糕"],
+        "🍚 粮油主食": ["米", "面", "粉", "油", "粮", "馒头", "饺子", "面包"],
+        "🧂 调味料": ["盐", "糖", "酱", "醋", "料酒", "胡椒", "辣椒粉", "味精", "鸡精", "花椒", "八角"],
+        "🍪 零食饮料": ["饼", "薯片", "巧克力", "糖果", "可乐", "水", "饮料", "啤酒"],
+    }
+
+    @classmethod
+    def _classify_shop_zone(cls, name: str) -> str:
+        """根据商品名称匹配关键词，返回所属超市分区。"""
+        n = (name or "").strip()
+        for zone, kws in cls.SHOP_ZONE_KEYWORDS.items():
+            for kw in kws:
+                if kw in n:
+                    return zone
+        return "📦 其他"
+
     def init_shop_tab(self):
         self.shop_tab = QWidget()
         self.shop_table = QTableWidget()
-        self.shop_table.setColumnCount(4)
-        self.shop_table.setHorizontalHeaderLabels(["食材名称", "数量", "单位", "已购买"])
+        self.shop_table.setColumnCount(5)
+        self.shop_table.setHorizontalHeaderLabels(["分区", "食材名称", "数量", "单位", "已购买"])
         self.shop_table.setShowGrid(False)
         self.shop_table.setAlternatingRowColors(True)
         self.shop_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -1267,7 +1624,7 @@ class MainWindow(QTabWidget):
         self.shop_table.verticalHeader().setVisible(False)
         shop_header = self.shop_table.horizontalHeader()
         shop_header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
-        for col in range(4):
+        for col in range(5):
             shop_header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
 
         btn_add = QPushButton("添加商品")
@@ -1401,16 +1758,37 @@ class MainWindow(QTabWidget):
         dialog.exec()
 
     def refresh_shop_table(self):
-        self.shop_table.setRowCount(len(self.shopping_items))
-        for row, item in enumerate(self.shopping_items):
+        # 给每项打上分区标签
+        for it in self.shopping_items:
+            it["zone"] = self._classify_shop_zone(it.get("name", ""))
+        # 按超市动线顺序 + 是否已购买排序（已购买的沉底）
+        order_index = {z: i for i, z in enumerate(self.SHOP_ZONE_ORDER)}
+        sorted_items = sorted(
+            enumerate(self.shopping_items),
+            key=lambda x: (
+                bool(x[1].get("bought")),
+                order_index.get(x[1]["zone"], 999),
+                x[1]["name"],
+            ),
+        )
+        self.shop_table.setRowCount(len(sorted_items))
+        # 记录排序后行号 -> 原始索引，便于操作回写
+        self._shop_row_to_index = []
+        for row, (orig_idx, item) in enumerate(sorted_items):
+            self._shop_row_to_index.append(orig_idx)
+            z_item = QTableWidgetItem(item["zone"])
             n_item = QTableWidgetItem(item["name"])
             q_item = QTableWidgetItem(str(item["quantity"]))
             u_item = QTableWidgetItem(item["unit"])
-            for it in [n_item, q_item, u_item]:
+            for it in [z_item, n_item, q_item, u_item]:
                 it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.shop_table.setItem(row, 0, n_item)
-            self.shop_table.setItem(row, 1, q_item)
-            self.shop_table.setItem(row, 2, u_item)
+            if item.get("bought"):
+                for it in [z_item, n_item, q_item, u_item]:
+                    it.setForeground(QColor("#9ca3af"))
+            self.shop_table.setItem(row, 0, z_item)
+            self.shop_table.setItem(row, 1, n_item)
+            self.shop_table.setItem(row, 2, q_item)
+            self.shop_table.setItem(row, 3, u_item)
             cb_wrap = QWidget()
             cb_layout = QHBoxLayout(cb_wrap)
             cb_layout.setContentsMargins(0, 0, 0, 0)
@@ -1421,34 +1799,46 @@ class MainWindow(QTabWidget):
                 lambda _state, r=row: self._on_shop_item_checked(r)
             )
             cb_layout.addWidget(checkbox)
-            self.shop_table.setCellWidget(row, 3, cb_wrap)
+            self.shop_table.setCellWidget(row, 4, cb_wrap)
+
+    def _row_to_item_index(self, row: int) -> int:
+        """显示行号 -> 真实 self.shopping_items 索引。"""
+        if hasattr(self, "_shop_row_to_index") and 0 <= row < len(self._shop_row_to_index):
+            return self._shop_row_to_index[row]
+        return row
 
     def _on_shop_item_checked(self, row: int) -> None:
-        if row < 0 or row >= len(self.shopping_items):
+        real_idx = self._row_to_item_index(row)
+        if real_idx < 0 or real_idx >= len(self.shopping_items):
             return
-        cb = self.shop_table.cellWidget(row, 3)
+        cb = self.shop_table.cellWidget(row, 4)
         if cb is None:
             return
         checkbox = cb.findChild(QCheckBox)
         if checkbox is None:
             return
         bought = checkbox.isChecked()
-        self.shopping_items[row]["bought"] = bought
-        iid = self.shopping_items[row].get("item_id", -1)
+        self.shopping_items[real_idx]["bought"] = bought
+        iid = self.shopping_items[real_idx].get("item_id", -1)
         if self._user_id > 0 and iid and iid > 0:
             db_update_shopping_item(iid, bought)
+        self.refresh_shop_table()  # 重排序：已购买项沉底
 
     def delete_selected_shop_items(self):
         rows = sorted({idx.row() for idx in self.shop_table.selectedIndexes()}, reverse=True)
         if not rows:
             QMessageBox.information(self, "删除购物项目", "请先选择要删除的购物项。")
             return
-        for row in rows:
-            if 0 <= row < len(self.shopping_items):
-                iid = self.shopping_items[row].get("item_id", -1)
+        # 把显示行映射回真实索引后再降序删除
+        real_indices = sorted(
+            {self._row_to_item_index(r) for r in rows}, reverse=True
+        )
+        for idx in real_indices:
+            if 0 <= idx < len(self.shopping_items):
+                iid = self.shopping_items[idx].get("item_id", -1)
                 if self._user_id > 0 and iid and iid > 0:
                     db_delete_shopping_item(iid)
-                del self.shopping_items[row]
+                del self.shopping_items[idx]
         self.refresh_shop_table()
 
     def clear_all_shopping_items(self):
@@ -1490,13 +1880,19 @@ class MainWindow(QTabWidget):
         self.knowledge_content.setReadOnly(True)
         self.knowledge_content.setPlaceholderText("选择左侧分类，查看饮食知识。")
 
+        self._knowledge_history: list[dict] = []  # 多轮对话上下文
+
         self.knowledge_search_edit = QLineEdit()
-        self.knowledge_search_edit.setPlaceholderText("输入食材名，如 鸡蛋 / 番茄 / 牛肉")
+        self.knowledge_search_edit.setPlaceholderText("输入问题，如 鸡蛋怎么保存 / 牛肉冷冻多久")
         self.knowledge_search_edit.returnPressed.connect(self.search_food_shelf_life)
-        self.btn_knowledge_search = QPushButton("AI 查询保质期")
+        self.btn_knowledge_search = QPushButton("AI 查询")
         self.btn_knowledge_search.setObjectName("primaryBtn")
         self.btn_knowledge_search.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_knowledge_search.clicked.connect(self.search_food_shelf_life)
+        self.btn_clear_history = QPushButton("清除对话")
+        self.btn_clear_history.setObjectName("ghostBtn")
+        self.btn_clear_history.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_clear_history.clicked.connect(self._clear_knowledge_history)
         self.knowledge_search_status = QLabel("")
         self.knowledge_search_status.setObjectName("pageSubtitle")
 
@@ -1507,6 +1903,7 @@ class MainWindow(QTabWidget):
         search_card_layout.setSpacing(8)
         search_card_layout.addWidget(self.knowledge_search_edit, 1)
         search_card_layout.addWidget(self.btn_knowledge_search)
+        search_card_layout.addWidget(self.btn_clear_history)
         search_card_layout.addWidget(self.knowledge_search_status)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -1547,65 +1944,96 @@ class MainWindow(QTabWidget):
             f"<p style='line-height:1.8; color:#475569;'>{self.knowledge_books.get(key, '').replace(chr(10), '<br>')}</p>"
         )
 
+    def _clear_knowledge_history(self) -> None:
+        """清除多轮对话历史，开始新一轮问答。"""
+        self._knowledge_history = []
+        self.knowledge_search_status.setText("对话已清除")
+        self.knowledge_content.setPlainText("对话已重置，请输入新问题。")
+
     def search_food_shelf_life(self):
-        food_name = self.knowledge_search_edit.text().strip()
-        if not food_name:
-            QMessageBox.information(self, "提示", "请输入要查询的食材名称。")
+        query = self.knowledge_search_edit.text().strip()
+        if not query:
+            QMessageBox.information(self, "提示", "请输入要查询的内容。")
             return
 
         self.btn_knowledge_search.setEnabled(False)
-        self.knowledge_search_status.setText("AI 正在查询，请稍候...")
-        self.knowledge_content.setPlainText(f"正在查询「{food_name}」的保质期和保存建议...")
+        self.knowledge_search_status.setText("AI 正在思考…")
+        # 将用户消息追加到历史
+        self._knowledge_history.append({"role": "user", "content": query})
+        # 限制历史长度，避免超出模型 context window
+        if len(self._knowledge_history) > 10:
+            self._knowledge_history = self._knowledge_history[-10:]
+
+        history_snapshot = list(self._knowledge_history)  # 传递快照给后台线程
 
         def task():
             from fallback.llm import get_llm
-
             llm = get_llm()
-            return llm.generate(
-                self._build_shelf_life_prompt(food_name),
-                system=(
-                    "你是家庭食材保存顾问，回答要简洁、实用、适合家庭冰箱管理。"
-                    "如果不同品牌、包装或保存环境会影响保质期，请明确提醒。"
-                ),
-                max_tokens=512,
+            system_msg = (
+                "你是家庭食材保存与饮食知识助手，回答要简洁、实用、适合家庭日常使用。"
+                "如果用户在追问，请结合上下文给出连贯回答。"
             )
+            # 尝试使用多轮消息接口；不支持时退回单条 generate
+            try:
+                messages = [{"role": "system", "content": system_msg}] + history_snapshot
+                return llm._chat_completion(messages, max_tokens=600)
+            except (AttributeError, TypeError):
+                # 本地 LLM 不支持 _chat_completion，降级为单轮
+                ctx = ""
+                for m in history_snapshot[:-1]:
+                    role = "用户" if m["role"] == "user" else "助手"
+                    ctx += f"{role}：{m['content']}\n"
+                prompt = (ctx + f"用户：{query}\n助手：") if ctx else query
+                return llm.generate(prompt, system=system_msg, max_tokens=600)
 
         worker = Worker(task)
         worker.signals.result.connect(
-            lambda text, name=food_name: self._on_shelf_life_ready(name, text)
+            lambda text, q=query: self._on_shelf_life_ready(q, text)
         )
         worker.signals.error.connect(self._on_shelf_life_error)
         worker.signals.finished.connect(
             lambda: self.btn_knowledge_search.setEnabled(True)
         )
         self.thread_pool.start(worker)
+        self.knowledge_search_edit.clear()
 
-    @staticmethod
-    def _build_shelf_life_prompt(food_name: str) -> str:
-        return (
-            f"请查询食材「{food_name}」的家庭保存与保质期建议。"
-            "请按以下结构回答：\n"
-            "1. 常温、冷藏、冷冻的大致保质期；\n"
-            "2. 最推荐的保存方式；\n"
-            "3. 变质/不宜食用的判断方法；\n"
-            "4. 家庭使用注意事项。\n"
-            "回答要用中文，简洁但具体。"
+    def _on_shelf_life_ready(self, query: str, text: str):
+        # 将 AI 回复也加入历史
+        self._knowledge_history.append({"role": "assistant", "content": text})
+        self.knowledge_search_status.setText(f"对话 {len(self._knowledge_history) // 2} 轮")
+        # 构建多轮对话展示 HTML
+        html_parts = []
+        for msg in self._knowledge_history:
+            role = msg["role"]
+            content = self._escape_html(msg["content"])
+            if role == "user":
+                html_parts.append(
+                    f"<p style='margin:6px 0 2px 0;'>"
+                    f"<b style='color:#0d9488;'>🙋 你：</b></p>"
+                    f"<p style='margin:0 0 8px 0; color:#1e293b;'>{content}</p>"
+                )
+            else:
+                html_parts.append(
+                    f"<p style='margin:6px 0 2px 0;'>"
+                    f"<b style='color:#7c3aed;'>🤖 AI：</b></p>"
+                    f"<pre style='white-space:pre-wrap; font-family:Microsoft YaHei,sans-serif;"
+                    f"line-height:1.7; color:#475569; margin:0 0 10px 0;'>{content}</pre>"
+                )
+        html_parts.append(
+            "<p style='color:#94a3b8; font-size:11px; border-top:1px solid #e2e8f0; "
+            "padding-top:6px; margin-top:4px;'>"
+            "AI 回答仅供家庭参考，请以包装标识和实际气味、颜色、质地为准。"
+            "点击「清除对话」可开始新话题。</p>"
         )
-
-    def _on_shelf_life_ready(self, food_name: str, text: str):
-        self.knowledge_search_status.setText("查询完成")
-        self.knowledge_content.setHtml(
-            f"<h3 style='color:#0d9488; margin-top:0;'>「{self._escape_html(food_name)}」保质期查询</h3>"
-            f"<pre style='white-space:pre-wrap; font-family:Microsoft YaHei, sans-serif;"
-            f" line-height:1.7; color:#475569;'>{self._escape_html(text)}</pre>"
-            "<p style='color:#94a3b8; font-size:12px;'>提示：AI 回答仅供家庭参考，请以包装标识和实际气味、颜色、质地为准。</p>"
-        )
+        self.knowledge_content.setHtml("".join(html_parts))
 
     def _on_shelf_life_error(self, message: str):
+        # 回滚最后一条用户消息
+        if self._knowledge_history and self._knowledge_history[-1]["role"] == "user":
+            self._knowledge_history.pop()
         self.knowledge_search_status.setText("查询失败")
         self.knowledge_content.setPlainText(
-            "AI 查询失败："
-            f"{message}\n\n"
+            f"AI 查询失败：{message}\n\n"
             "请确认本地模型已下载，或配置 DEEPSEEK_API_KEY 后重启程序。"
         )
 
