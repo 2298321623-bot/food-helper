@@ -17,6 +17,11 @@ from services.inventory_service import (
     recipe_ingredients_from_dict,
 )
 from services.nutrition_service import summarize_pantry_nutrition
+from db.db_manager import (
+    db_load_ingredients, db_add_ingredient, db_update_ingredient, db_delete_ingredient,
+    db_load_shopping, db_add_shopping_item, db_update_shopping_item,
+    db_delete_shopping_item, db_clear_shopping,
+)
 
 # (WorkerSignals 与 Worker 类保持原样不变...)
 class WorkerSignals(QObject):
@@ -62,9 +67,10 @@ def _recognize_voice_once(timeout: float = 6.0, phrase_time_limit: float = 8.0) 
 class MainWindow(QTabWidget):
     def __init__(self, current_user: dict | None = None):
         super().__init__()
-        self.current_user = current_user or {"username": "guest", "role": "user"}
-        self.ingredients = []
-        self.shopping_items = []
+        self.current_user = current_user or {"username": "guest", "role": "user", "user_id": 0}
+        self._user_id: int = int(self.current_user.get("user_id") or 0)
+        self.ingredients = []   # 内存列表，每项含 ingredient_id 用于持久化
+        self.shopping_items = []  # 内存列表，每项含 item_id 用于持久化
         self._active_recipe_for_cooking = None
         self.recipes = [
             {"name": "番茄炒蛋", "tags": ["家常菜"], "time": "15分钟内", "diff": "简单", "ingredients": ["鸡蛋", "番茄"], "description": "用番茄和鸡蛋快速炒制，口感酸甜，营养丰富。"},
@@ -80,6 +86,7 @@ class MainWindow(QTabWidget):
             "人群饮食建议": "1. 儿童饮食应注意营养均衡，多吃蔬菜水果。\n2. 青年人可适当补充蛋白质，加强体力恢复。\n3. 老年人宜少油少盐，多吃高纤维食物。"
         }
         self.init_window()
+        self._load_from_db()   # 从数据库加载用户数据
         self.init_ingredient_tab()
         self.init_recipe_tab()
         self.init_shop_tab()
@@ -122,6 +129,46 @@ class MainWindow(QTabWidget):
         cl.addWidget(btn_pwd)
         cl.addWidget(btn_logout)
         self.setCornerWidget(corner, Qt.Corner.TopRightCorner)
+
+    def _load_from_db(self) -> None:
+        """启动时从数据库加载当前用户的食材和购物清单。"""
+        if self._user_id <= 0:
+            return
+        try:
+            from datetime import date as _date
+            raw_ingredients = db_load_ingredients(self._user_id)
+            self.ingredients = []
+            for r in raw_ingredients:
+                expiry_str = r.get("expiry_date_str", "")
+                try:
+                    expiry = _date.fromisoformat(expiry_str)
+                except Exception:
+                    expiry = _date.today()
+                self.ingredients.append({
+                    "ingredient_id": r["ingredient_id"],
+                    "name": r["name"],
+                    "amount": r["amount"],
+                    "unit": r["unit"],
+                    "expiry": expiry,
+                    "category": r["category"],
+                    "location": r["location"],
+                })
+        except Exception as e:
+            print(f"[WARN] 加载食材失败：{e}")
+
+        try:
+            raw_shopping = db_load_shopping(self._user_id)
+            self.shopping_items = []
+            for r in raw_shopping:
+                self.shopping_items.append({
+                    "item_id": r["item_id"],
+                    "name": r["name"],
+                    "quantity": r["quantity"],
+                    "unit": r["unit"],
+                    "bought": r["bought"],
+                })
+        except Exception as e:
+            print(f"[WARN] 加载购物清单失败：{e}")
 
     def _logout(self) -> None:
         self._log_op("退出登录")
@@ -343,6 +390,7 @@ class MainWindow(QTabWidget):
             except ValueError:
                 QMessageBox.warning(dialog, "输入错误", "请填写有效的数量（大于 0 的数字）。")
                 return
+            expiry_str = expiry.strftime("%Y-%m-%d")
             entry = {
                 "name": name,
                 "amount": amount,
@@ -352,9 +400,20 @@ class MainWindow(QTabWidget):
                 "location": location,
             }
             if is_edit:
+                old_entry = self.ingredients[edit_row]
+                entry["ingredient_id"] = old_entry.get("ingredient_id", -1)
+                if self._user_id > 0 and entry["ingredient_id"] > 0:
+                    db_update_ingredient(
+                        entry["ingredient_id"], name, amount, unit, expiry_str, category, location
+                    )
                 self.ingredients[edit_row] = entry
                 self._log_op("编辑食材", f"{name} {amount}{unit}")
             else:
+                if self._user_id > 0:
+                    new_id = db_add_ingredient(
+                        self._user_id, name, amount, unit, expiry_str, category, location
+                    )
+                    entry["ingredient_id"] = new_id
                 self.ingredients.append(entry)
                 self._log_op("添加食材", f"{name} {amount}{unit}")
             self.refresh_ingredient_table(show_expiry_alert=True)
@@ -432,7 +491,11 @@ class MainWindow(QTabWidget):
     # (delete_ingredient, remove_selected_ingredient, check_expiry_alert 保持原样不变...)
     def delete_ingredient(self, row):
         if 0 <= row < len(self.ingredients):
-            name = self.ingredients[row].get("name", "?")
+            entry = self.ingredients[row]
+            name = entry.get("name", "?")
+            iid = entry.get("ingredient_id", -1)
+            if self._user_id > 0 and iid and iid > 0:
+                db_delete_ingredient(iid)
             del self.ingredients[row]
             self._log_op("删除食材", name)
             self.refresh_ingredient_table()
@@ -1320,14 +1383,16 @@ class MainWindow(QTabWidget):
             if not name or not quantity or not unit:
                 QMessageBox.warning(dialog, "输入错误", "请填写完整购物项目。")
                 return
-            self.shopping_items.append(
-                {
-                    "name": name,
-                    "quantity": quantity,
-                    "unit": unit,
-                    "bought": bought,
-                }
-            )
+            new_item = {
+                "name": name,
+                "quantity": quantity,
+                "unit": unit,
+                "bought": bought,
+            }
+            if self._user_id > 0:
+                new_id = db_add_shopping_item(self._user_id, name, quantity, unit, bought)
+                new_item["item_id"] = new_id
+            self.shopping_items.append(new_item)
             self._log_op("添加购物项", f"{name} {quantity}{unit}")
             self.refresh_shop_table()
             dialog.accept()
@@ -1367,7 +1432,11 @@ class MainWindow(QTabWidget):
         checkbox = cb.findChild(QCheckBox)
         if checkbox is None:
             return
-        self.shopping_items[row]["bought"] = checkbox.isChecked()
+        bought = checkbox.isChecked()
+        self.shopping_items[row]["bought"] = bought
+        iid = self.shopping_items[row].get("item_id", -1)
+        if self._user_id > 0 and iid and iid > 0:
+            db_update_shopping_item(iid, bought)
 
     def delete_selected_shop_items(self):
         rows = sorted({idx.row() for idx in self.shop_table.selectedIndexes()}, reverse=True)
@@ -1376,6 +1445,9 @@ class MainWindow(QTabWidget):
             return
         for row in rows:
             if 0 <= row < len(self.shopping_items):
+                iid = self.shopping_items[row].get("item_id", -1)
+                if self._user_id > 0 and iid and iid > 0:
+                    db_delete_shopping_item(iid)
                 del self.shopping_items[row]
         self.refresh_shop_table()
 
@@ -1390,6 +1462,8 @@ class MainWindow(QTabWidget):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
+        if self._user_id > 0:
+            db_clear_shopping(self._user_id)
         self.shopping_items.clear()
         self.refresh_shop_table()
 
@@ -1960,6 +2034,12 @@ class MainWindow(QTabWidget):
         if not new_items:
             QMessageBox.information(self, "未识别", f"未能从「{text}」中解析出新商品。")
             return
+        for item in new_items:
+            if self._user_id > 0:
+                new_id = db_add_shopping_item(
+                    self._user_id, item["name"], item["quantity"], item["unit"], item["bought"]
+                )
+                item["item_id"] = new_id
         self.shopping_items.extend(new_items)
         self.refresh_shop_table()
         QMessageBox.information(

@@ -673,3 +673,223 @@ def get_all_logs():
     res = c.fetchall()
     conn.close()
     return res
+
+
+# ============================================================
+# 食材持久化：与 MainWindow 对接的干净 CRUD（按当前用户隔离）
+# ============================================================
+
+def db_load_ingredients(user_id: int) -> list[dict]:
+    """读取指定用户的全部食材，返回 list[dict]。
+
+    dict 字段：ingredient_id, name, quantity, unit, expiry_date, category, location
+    """
+    try:
+        conn = connect_db()
+        c = conn.cursor()
+        c.execute(
+            "SELECT ingredient_id, name, quantity, unit, expiry_date, category, storage_location "
+            "FROM ingredients WHERE user_id=? ORDER BY ingredient_id",
+            (user_id,),
+        )
+        rows = c.fetchall()
+        conn.close()
+        result = []
+        for row in rows:
+            iid, name, qty, unit, expiry_str, category, location = row
+            result.append({
+                "ingredient_id": iid,
+                "name": name or "",
+                "amount": float(qty or 1),
+                "unit": unit or "个",
+                "expiry_date_str": expiry_str or "",
+                "category": category or "蔬菜",
+                "location": location or "",
+            })
+        return result
+    except Exception as e:
+        print(f"[ERROR] db_load_ingredients: {e}")
+        return []
+
+
+def db_add_ingredient(user_id: int, name: str, quantity: float,
+                      unit: str, expiry_date_str: str, category: str,
+                      location: str) -> int:
+    """新增一条食材记录，返回新插入的 ingredient_id（失败返回 -1）。
+
+    :param user_id: 当前登录用户 ID
+    :param name: 食材名称
+    :param quantity: 数量
+    :param unit: 单位
+    :param expiry_date_str: 保质期字符串 YYYY-MM-DD
+    :param category: 分类
+    :param location: 存放位置
+    """
+    try:
+        conn = connect_db()
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO ingredients(user_id, name, quantity, unit, expiry_date, category, storage_location, create_time) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (user_id, name, quantity, unit, expiry_date_str, category, location, get_time()),
+        )
+        conn.commit()
+        new_id = c.lastrowid
+        conn.close()
+        return new_id
+    except Exception as e:
+        print(f"[ERROR] db_add_ingredient: {e}")
+        return -1
+
+
+def db_update_ingredient(ingredient_id: int, name: str, quantity: float,
+                         unit: str, expiry_date_str: str, category: str,
+                         location: str) -> bool:
+    """更新食材记录。返回是否成功。
+
+    :param ingredient_id: 要更新的食材主键
+    """
+    try:
+        conn = connect_db()
+        c = conn.cursor()
+        c.execute(
+            "UPDATE ingredients SET name=?, quantity=?, unit=?, expiry_date=?, "
+            "category=?, storage_location=? WHERE ingredient_id=?",
+            (name, quantity, unit, expiry_date_str, category, location, ingredient_id),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[ERROR] db_update_ingredient: {e}")
+        return False
+
+
+def db_delete_ingredient(ingredient_id: int) -> bool:
+    """删除一条食材记录。返回是否成功。
+
+    :param ingredient_id: 要删除的食材主键
+    """
+    try:
+        conn = connect_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM ingredients WHERE ingredient_id=?", (ingredient_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[ERROR] db_delete_ingredient: {e}")
+        return False
+
+
+# ============================================================
+# 购物清单持久化：与 MainWindow 对接的干净 CRUD
+# ============================================================
+
+def db_load_shopping(user_id: int) -> list[dict]:
+    """读取指定用户的全部购物清单，返回 list[dict]。
+
+    dict 字段：item_id, name, quantity, unit, bought
+    """
+    try:
+        conn = connect_db()
+        c = conn.cursor()
+        c.execute(
+            "SELECT item_id, name, quantity, unit, checked FROM shopping_lists "
+            "WHERE user_id=? ORDER BY item_id",
+            (user_id,),
+        )
+        rows = c.fetchall()
+        conn.close()
+        return [
+            {
+                "item_id": r[0],
+                "name": r[1] or "",
+                "quantity": str(r[2] or 1),
+                "unit": r[3] or "个",
+                "bought": bool(r[4]),
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        print(f"[ERROR] db_load_shopping: {e}")
+        return []
+
+
+def db_add_shopping_item(user_id: int, name: str, quantity: str,
+                         unit: str, bought: bool = False) -> int:
+    """新增购物清单项，返回新插入的 item_id（失败返回 -1）。
+
+    :param user_id: 当前登录用户 ID
+    :param name: 商品名称
+    :param quantity: 数量（字符串）
+    :param unit: 单位
+    :param bought: 是否已购买
+    """
+    try:
+        conn = connect_db()
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO shopping_lists(user_id, name, quantity, unit, checked) VALUES (?, ?, ?, ?, ?)",
+            (user_id, name, float(quantity) if quantity else 1, unit, int(bought)),
+        )
+        conn.commit()
+        new_id = c.lastrowid
+        conn.close()
+        return new_id
+    except Exception as e:
+        print(f"[ERROR] db_add_shopping_item: {e}")
+        return -1
+
+
+def db_update_shopping_item(item_id: int, bought: bool) -> bool:
+    """更新购物清单项的已购买状态。
+
+    :param item_id: 购物清单项主键
+    :param bought: 是否已购买
+    """
+    try:
+        conn = connect_db()
+        c = conn.cursor()
+        c.execute("UPDATE shopping_lists SET checked=? WHERE item_id=?", (int(bought), item_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[ERROR] db_update_shopping_item: {e}")
+        return False
+
+
+def db_delete_shopping_item(item_id: int) -> bool:
+    """删除购物清单项。
+
+    :param item_id: 购物清单项主键
+    """
+    try:
+        conn = connect_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM shopping_lists WHERE item_id=?", (item_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[ERROR] db_delete_shopping_item: {e}")
+        return False
+
+
+def db_clear_shopping(user_id: int) -> bool:
+    """清空某用户的全部购物清单。
+
+    :param user_id: 当前登录用户 ID
+    """
+    try:
+        conn = connect_db()
+        c = conn.cursor()
+        c.execute("DELETE FROM shopping_lists WHERE user_id=?", (user_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[ERROR] db_clear_shopping: {e}")
+        return False
+    return res
