@@ -24,6 +24,58 @@ UNIT_MAP = {
 DEFAULT_UNIT = "个"
 DEFAULT_QUANTITY = "1"
 
+# 中文数字 → 阿拉伯数字（覆盖常见购物口语数字）
+CN_NUM_MAP = {
+    "零": 0, "〇": 0,
+    "一": 1, "壹": 1, "二": 2, "贰": 2, "两": 2, "俩": 2,
+    "三": 3, "叁": 3, "四": 4, "肆": 4, "五": 5, "伍": 5,
+    "六": 6, "陆": 6, "七": 7, "柒": 7, "八": 8, "捌": 8,
+    "九": 9, "玖": 9, "十": 10, "拾": 10,
+    "半": 0.5,
+}
+
+
+def _cn_number_to_float(text: str) -> Optional[float]:
+    """把简单中文数字串（如 一、两、十、十二、二十、二十三、半）转为 float。"""
+    if not text:
+        return None
+    text = text.strip()
+    if not text:
+        return None
+    # 优先尝试阿拉伯数字
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    if text == "半":
+        return 0.5
+    # 形如 "十"、"十X"、"X十"、"X十Y"
+    if "十" in text or "拾" in text:
+        t = text.replace("拾", "十")
+        if t == "十":
+            return 10.0
+        if t.startswith("十"):  # 十X
+            tail = CN_NUM_MAP.get(t[1:], None)
+            return 10.0 + tail if tail is not None else None
+        parts = t.split("十", 1)
+        head = CN_NUM_MAP.get(parts[0], None)
+        if head is None:
+            return None
+        if not parts[1]:
+            return head * 10.0
+        tail = CN_NUM_MAP.get(parts[1], None)
+        return head * 10.0 + tail if tail is not None else None
+    # 单个中文数字
+    if len(text) == 1 and text in CN_NUM_MAP:
+        return float(CN_NUM_MAP[text])
+    return None
+
+
+# 中文数字字符（用于在正则中匹配数量）
+_CN_DIGIT_CHARS = "零〇一壹二贰两俩三叁四肆五伍六陆七柒八捌九玖十拾半"
+# 数量匹配片段：阿拉伯数字 或 中文数字串（1~3 个字符，足够覆盖 一/两/十/二十三 等）
+NUM_PATTERN = rf"(?:[\d]+(?:\.\d+)?|[{_CN_DIGIT_CHARS}]{{1,3}})"
+
 
 @dataclass
 class ParsedShoppingItem:
@@ -59,39 +111,37 @@ def parse_voice_to_shopping_list(
     return items
 
 
+def _normalize_quantity(q: str) -> str:
+    """把中文数字数量统一成阿拉伯数字字符串。"""
+    val = _cn_number_to_float(q)
+    if val is None:
+        return q
+    return str(int(val)) if val == int(val) else str(val)
+
+
 def _rule_based_parse(text: str) -> List[ParsedShoppingItem]:
-    """基于规则的快速解析。"""
+    """基于规则的快速解析（支持中文数字与阿拉伯数字、可识别多项）。"""
     items = []
-    
-    # 模式1：「买/需要/要 + 数量 + 单位 + 食材名」
-    # 例如：「买 3 斤 猪肉」、「需要 2 个 鸡蛋」、「要 500 克 番茄」
-    pattern1 = re.compile(
-        r'(?:买|需要|要|准备|加)\s*'
-        r'([\d.]+)\s*'
-        r'(' + '|'.join(UNIT_MAP.keys()) + r')\s*'
-        r'([\u4e00-\u9fff]+(?:[\u4e00-\u9fff]+)?)'
+    unit_alt = '|'.join(UNIT_MAP.keys())
+
+    # 通用模式：可选动词 + 数量 + 单位 + 食材名（食材名贪婪 2~6 字）
+    # 例如：「买两斤猪肉」「3 斤 猪肉」「两个鸡蛋一斤猪肉」「需要 2 个鸡蛋」
+    pattern = re.compile(
+        r'(?:买|需要|要|准备|加|添加)?\s*'
+        r'(' + NUM_PATTERN + r')\s*'
+        r'(' + unit_alt + r')\s*'
+        r'([\u4e00-\u9fff]{1,6}?)'
+        r'(?=(?:' + NUM_PATTERN + r')\s*(?:' + unit_alt + r')|[，,、和及与。.！!？?\s]|$)'
     )
-    for m in pattern1.finditer(text):
+    for m in pattern.finditer(text):
+        name = m.group(3).strip()
+        if not name:
+            continue
         items.append(ParsedShoppingItem(
-            name=m.group(3).strip(),
-            quantity=m.group(1),
+            name=name,
+            quantity=_normalize_quantity(m.group(1)),
             unit=m.group(2),
         ))
-    
-    # 模式2：「数量 + 单位 + 食材名」（无动词）
-    # 例如：「3 斤 猪肉」、「2 个 鸡蛋」
-    if not items:
-        pattern2 = re.compile(
-            r'([\d.]+)\s*'
-            r'(' + '|'.join(UNIT_MAP.keys()) + r')\s*'
-            r'([\u4e00-\u9fff]+(?:[\u4e00-\u9fff]+)?)'
-        )
-        for m in pattern2.finditer(text):
-            items.append(ParsedShoppingItem(
-                name=m.group(3).strip(),
-                quantity=m.group(1),
-                unit=m.group(2),
-            ))
     
     # 模式3：逗号/顿号分隔的纯食材名列表
     # 例如：「鸡蛋，番茄，盐，油」
