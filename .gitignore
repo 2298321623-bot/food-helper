@@ -35,4 +35,4 @@ models/
 huggingface/
 
 # API 密钥
-.env
+.env*.docx
