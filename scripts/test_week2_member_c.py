@@ -18,6 +18,23 @@ def test_ingredient_priority_ranking():
     print(f"[OK] 有限食材优先：Top1={top['name']} 得分={top['match_score']}")
 
 
+def test_basic_seasonings_do_not_lower_score():
+    from rag.core import match_recipes_by_ingredients
+
+    recipes = [
+        {
+            "name": "番茄炒蛋",
+            "ingredients": ["鸡蛋", "番茄", "盐", "油"],
+        }
+    ]
+    result = match_recipes_by_ingredients(
+        recipes, ["鸡蛋", "番茄"], embedding_service=None
+    )[0]
+    assert result["ingredient_match"] == 1.0
+    assert result["missing_ingredients"] == []
+    print(f"[OK] 基础调料不扣分：得分={result['match_score']}")
+
+
 def test_preference_search():
     from services.recipe_service import get_recipe_service
 
@@ -75,6 +92,7 @@ def test_cloud_llm_optional():
 def main():
     print("=== 组员 C Week2 自测 ===\n")
     test_ingredient_priority_ranking()
+    test_basic_seasonings_do_not_lower_score()
     test_preference_search()
     test_dual_engine_factory()
     test_generate_recipe_local()

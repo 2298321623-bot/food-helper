@@ -23,6 +23,19 @@ from db.db_manager import (
     db_delete_shopping_item, db_clear_shopping,
 )
 
+LOCATION_UNSET = "未添加位置"
+LOCATION_OPTIONS = [LOCATION_UNSET, "冷藏区", "冷冻区", "常温区"]
+
+
+def normalize_location(value: str | None) -> str:
+    text = (value or "").strip()
+    return text if text in LOCATION_OPTIONS and text != LOCATION_UNSET else ""
+
+
+def display_location(value: str | None) -> str:
+    return normalize_location(value) or LOCATION_UNSET
+
+
 # (WorkerSignals 与 Worker 类保持原样不变...)
 class WorkerSignals(QObject):
     finished = pyqtSignal()
@@ -72,6 +85,7 @@ class MainWindow(QTabWidget):
         self.ingredients = []   # 内存列表，每项含 ingredient_id 用于持久化
         self.shopping_items = []  # 内存列表，每项含 item_id 用于持久化
         self._active_recipe_for_cooking = None
+        self._expiry_alert_checked_this_session = False
         self.recipes = [
             {"name": "番茄炒蛋", "tags": ["家常菜"], "time": "15分钟内", "diff": "简单", "ingredients": ["鸡蛋", "番茄"], "description": "用番茄和鸡蛋快速炒制，口感酸甜，营养丰富。"},
             {"name": "蒜蓉虾仁", "tags": ["家常菜", "增肌餐"], "time": "15-30分钟", "diff": "中等", "ingredients": ["虾仁", "蒜"], "description": "鲜嫩虾仁搭配蒜蓉，适合轻松下厨。"},
@@ -97,6 +111,10 @@ class MainWindow(QTabWidget):
         self.currentChanged.connect(self._on_main_tab_changed)
         self.thread_pool = QThreadPool.globalInstance()
         self._refresh_llm_status_label()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._maybe_show_expiry_alert_once()
 
     def init_window(self):
         self.setObjectName("mainWindow")
@@ -151,7 +169,7 @@ class MainWindow(QTabWidget):
                     "unit": r["unit"],
                     "expiry": expiry,
                     "category": r["category"],
-                    "location": r["location"],
+                    "location": normalize_location(r["location"]),
                 })
         except Exception as e:
             print(f"[WARN] 加载食材失败：{e}")
@@ -178,13 +196,23 @@ class MainWindow(QTabWidget):
         if index < 0 or index >= self.count():
             return
         widget = self.widget(index)
-        if widget is self.recipe_tab:
+        if hasattr(self, "ingredient_tab") and widget is self.ingredient_tab:
+            self._maybe_show_expiry_alert_once()
+        elif widget is self.recipe_tab:
             if self.mode_box.currentText() == "用现有食材做":
                 self._refresh_ingredient_picker()
         elif hasattr(self, "stats_tab") and widget is self.stats_tab:
             self.refresh_stats_view()
         elif hasattr(self, "admin_tab") and widget is self.admin_tab:
             self.refresh_admin_view()
+
+    def _maybe_show_expiry_alert_once(self):
+        if self._expiry_alert_checked_this_session:
+            return
+        if not hasattr(self, "ingredient_tab") or self.currentWidget() is not self.ingredient_tab:
+            return
+        self._expiry_alert_checked_this_session = True
+        self.check_expiry_alert()
 
     def _on_recipe_mode_changed(self, mode: str):
         use_pantry = mode == "用现有食材做"
@@ -258,12 +286,6 @@ class MainWindow(QTabWidget):
         self.btn_remove_ingredient.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_remove_ingredient.clicked.connect(self.remove_selected_ingredient)
 
-        self.btn_clear_fridge = QPushButton("🍳 一键清冰箱菜谱")
-        self.btn_clear_fridge.setObjectName("secondaryBtn")
-        self.btn_clear_fridge.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_clear_fridge.setToolTip("基于临期食材，AI 自动生成「清冰箱」菜谱")
-        self.btn_clear_fridge.clicked.connect(self.generate_clear_fridge_recipe)
-
         self.btn_fridge_zones = QPushButton("🧊 分区视图")
         self.btn_fridge_zones.setObjectName("ghostBtn")
         self.btn_fridge_zones.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -292,7 +314,6 @@ class MainWindow(QTabWidget):
         toolbar_layout.setSpacing(8)
         toolbar_layout.addWidget(self.btn_add_ingredient)
         toolbar_layout.addWidget(self.btn_remove_ingredient)
-        toolbar_layout.addWidget(self.btn_clear_fridge)
         toolbar_layout.addWidget(self.btn_fridge_zones)
         toolbar_layout.addStretch()
         toolbar_layout.addWidget(self.btn_import_excel)
@@ -314,7 +335,7 @@ class MainWindow(QTabWidget):
         self.ingredient_tab.setLayout(layout)
         self.addTab(self.ingredient_tab, "食材管理")
 
-        self.refresh_ingredient_table(show_expiry_alert=True)
+        self.refresh_ingredient_table(show_expiry_alert=False)
 
     def show_add_ingredient_dialog(self, edit_row=None):
         if not isinstance(edit_row, int):
@@ -360,7 +381,8 @@ class MainWindow(QTabWidget):
         
         category_box = QComboBox()
         category_box.addItems(["蔬菜", "肉类", "水果", "调料", "主食", "水产", "蛋奶"])
-        location_edit = QLineEdit()
+        location_box = QComboBox()
+        location_box.addItems(LOCATION_OPTIONS)
 
         btn_confirm = QPushButton("保存修改" if is_edit else "确认添加")
         btn_confirm.setObjectName("primaryBtn")
@@ -386,7 +408,9 @@ class MainWindow(QTabWidget):
             cidx = category_box.findText(item.get("category", "蔬菜"))
             if cidx >= 0:
                 category_box.setCurrentIndex(cidx)
-            location_edit.setText(item.get("location", ""))
+            lidx = location_box.findText(display_location(item.get("location", "")))
+            if lidx >= 0:
+                location_box.setCurrentIndex(lidx)
 
         form_layout = QFormLayout()
         form_layout.setSpacing(12)
@@ -395,7 +419,7 @@ class MainWindow(QTabWidget):
         form_layout.addRow("数量 / 单位", amount_unit_row)
         form_layout.addRow("保质期", expiry_edit)
         form_layout.addRow("食材分类", category_box)
-        form_layout.addRow("存放位置", location_edit)
+        form_layout.addRow("存放位置", location_box)
 
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(8)
@@ -414,7 +438,7 @@ class MainWindow(QTabWidget):
             unit = unit_box.currentText().strip() or "个"
             expiry = expiry_edit.date().toPyDate()
             category = category_box.currentText()
-            location = location_edit.text().strip()
+            location = normalize_location(location_box.currentText())
             if not name:
                 QMessageBox.warning(dialog, "输入错误", "请填写食材名称。")
                 return
@@ -449,7 +473,7 @@ class MainWindow(QTabWidget):
                     entry["ingredient_id"] = new_id
                 self.ingredients.append(entry)
                 self._log_op("添加食材", f"{name} {amount}{unit}")
-            self.refresh_ingredient_table(show_expiry_alert=True)
+            self.refresh_ingredient_table(show_expiry_alert=False)
             self._refresh_ingredient_picker()
             self.refresh_stats_view()
             dialog.accept()
@@ -472,7 +496,7 @@ class MainWindow(QTabWidget):
             amount_unit_item = QTableWidgetItem(format_amount_display(amount, unit))
             expiry_item = QTableWidgetItem(expiry.strftime("%Y-%m-%d"))
             category_item = QTableWidgetItem(item["category"])
-            location_item = QTableWidgetItem(item["location"])
+            location_item = QTableWidgetItem(display_location(item.get("location", "")))
 
             for cell_item in [
                 name_item, amount_unit_item, expiry_item, category_item, location_item
@@ -563,82 +587,29 @@ class MainWindow(QTabWidget):
                 message_parts.append("已过期食材：\n" + "\n".join(expired))
             if soon:
                 message_parts.append("即将过期食材：\n" + "\n".join(soon))
-            # 改用带"一键清冰箱"按钮的对话框
-            box = QMessageBox(self)
-            box.setIcon(QMessageBox.Icon.Warning)
-            box.setWindowTitle("保质期提醒")
-            box.setText("\n\n".join(message_parts))
-            btn_clear = box.addButton("🍳 立即生成清冰箱菜谱", QMessageBox.ButtonRole.AcceptRole)
-            box.addButton("稍后处理", QMessageBox.ButtonRole.RejectRole)
-            box.exec()
-            if box.clickedButton() is btn_clear:
-                self.generate_clear_fridge_recipe()
-
-    # ====================== 创新点：一键清冰箱菜谱 ======================
-    def _get_near_expiry_ingredients(self, days: int = 5) -> list[dict]:
-        """返回剩余天数 <= days 的食材（含已过期）。"""
-        now = datetime.now().date()
-        result = []
-        for item in self.ingredients:
-            try:
-                days_left = (item["expiry"] - now).days
-            except Exception:
-                continue
-            if days_left <= days:
-                result.append(item)
-        return result
-
-    def generate_clear_fridge_recipe(self) -> None:
-        """基于临期食材调用 LLM 生成「清冰箱」菜谱，跳转到食谱页展示。"""
-        near = self._get_near_expiry_ingredients(days=5)
-        if not near:
-            QMessageBox.information(
-                self, "清冰箱菜谱", "目前没有临期食材，冰箱状态良好 👍"
+            QMessageBox.warning(
+                self, "保质期提醒", "\n\n".join(message_parts)
             )
-            return
-        names = [it["name"] for it in near]
-        # 切到菜谱页，复用现有 AI 生成流程
-        self.setCurrentWidget(self.recipe_tab)
-        self.mode_box.setCurrentText("用现有食材做")
-        self._on_recipe_mode_changed("用现有食材做")
-        # 仅勾选临期食材
-        if hasattr(self, "ingredient_pick_list"):
-            for i in range(self.ingredient_pick_list.count()):
-                it = self.ingredient_pick_list.item(i)
-                pick_name = it.data(Qt.ItemDataRole.UserRole)
-                it.setCheckState(
-                    Qt.CheckState.Checked if pick_name in names else Qt.CheckState.Unchecked
-                )
-        # 临时设置"额外要求"提示词
-        if hasattr(self, "exclude_edit"):
-            self.exclude_edit.setText("")
-        self.recipe_detail.setPlainText(
-            f"🍳 正在为临期食材生成清冰箱菜谱：{', '.join(names)}…\n"
-            "AI 思考中，请稍候。"
-        )
-        self._log_op("清冰箱菜谱", f"基于 {len(names)} 种临期食材")
-        # 直接调用生成
-        self.generate_recipe_list()
 
     # ====================== 创新点：冰箱分区可视化 ======================
     def show_fridge_zones_dialog(self) -> None:
-        """按 location 字段把食材分为 冷冻/冷藏/常温/其他 四区展示。"""
+        """按 location 字段把食材分为 冷冻/冷藏/常温/未添加 四区展示。"""
         zones: dict[str, list[dict]] = {
-            "❄️ 冷冻区": [],
             "🧊 冷藏区": [],
+            "❄️ 冷冻区": [],
             "🌡️ 常温区": [],
-            "❓ 未分类": [],
+            "❓ 未添加位置": [],
         }
         for item in self.ingredients:
-            loc = (item.get("location") or "").strip()
-            if any(k in loc for k in ("冻", "freeze", "Freezer")):
+            loc = normalize_location(item.get("location", ""))
+            if loc == "冷冻区":
                 zones["❄️ 冷冻区"].append(item)
-            elif any(k in loc for k in ("藏", "冰箱", "Fridge", "保鲜")):
+            elif loc == "冷藏区":
                 zones["🧊 冷藏区"].append(item)
-            elif any(k in loc for k in ("常温", "橱", "柜", "Pantry", "干燥")):
+            elif loc == "常温区":
                 zones["🌡️ 常温区"].append(item)
             else:
-                zones["❓ 未分类"].append(item)
+                zones["❓ 未添加位置"].append(item)
 
         dlg = QDialog(self)
         dlg.setWindowTitle("冰箱分区视图")
@@ -691,7 +662,7 @@ class MainWindow(QTabWidget):
                     "单位": it.get("unit", "个"),
                     "保质期": it["expiry"].strftime("%Y-%m-%d"),
                     "分类": it.get("category", ""),
-                    "存放位置": it.get("location", ""),
+                    "存放位置": display_location(it.get("location", "")),
                 })
             df = pd.DataFrame(rows)
             if path.lower().endswith(".csv"):
@@ -749,7 +720,7 @@ class MainWindow(QTabWidget):
                     amount = 1.0
                 unit = str(r.get("unit", "个") or "个").strip()
                 category = str(r.get("category", "蔬菜") or "蔬菜").strip()
-                location = str(r.get("location", "") or "").strip()
+                location = normalize_location(str(r.get("location", "") or "").strip())
                 expiry_str = str(r.get("expiry", "") or "").strip()
                 try:
                     expiry = _date.fromisoformat(expiry_str[:10])

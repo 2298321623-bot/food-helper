@@ -27,6 +27,23 @@ def serialize_embedding(embedding):
 def deserialize_embedding(blob):
     return np.frombuffer(blob, dtype=np.float32)
 
+
+def _table_columns(cursor, table_name: str) -> set[str]:
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    return {row[1] for row in cursor.fetchall()}
+
+
+def _ensure_column(cursor, table_name: str, column_name: str, column_def: str) -> None:
+    if column_name not in _table_columns(cursor, table_name):
+        cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
+
+
+def _migrate_schema(cursor) -> None:
+    """为旧版 data.db 补齐新增列，避免 CREATE TABLE IF NOT EXISTS 跳过后 INSERT 失败。"""
+    _ensure_column(cursor, "users", "password", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(cursor, "users", "role", "TEXT NOT NULL DEFAULT 'user'")
+
+
 def init_db():
     """创建所有表"""
     conn = connect_db()
@@ -39,6 +56,7 @@ def init_db():
                    username TEXT NOT NULL UNIQUE,
                    password TEXT NOT NULL,
                    role TEXT NOT NULL DEFAULT 'user') ''')
+    _migrate_schema(cursor)
     
     # 插入默认管理员（如不存在）；密码使用 SHA-256+salt 安全存储
     cursor.execute("SELECT user_id FROM users WHERE username='admin'")

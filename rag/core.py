@@ -22,6 +22,33 @@ from rag.embeddings import EmbeddingService, cosine_similarity
 
 logger = logging.getLogger(__name__)
 
+BASIC_SEASONINGS = {
+    "盐",
+    "食盐",
+    "油",
+    "食用油",
+    "植物油",
+    "花生油",
+    "玉米油",
+    "菜籽油",
+    "糖",
+    "白糖",
+    "白砂糖",
+    "冰糖",
+    "酱油",
+    "生抽",
+    "老抽",
+    "葱",
+    "小葱",
+    "大葱",
+    "姜",
+    "生姜",
+    "蒜",
+    "大蒜",
+    "蒜末",
+    "葱姜蒜",
+}
+
 
 def _normalize_ingredient(name: str) -> str:
     """简单归一化：去空格、统一常见别名。"""
@@ -33,6 +60,30 @@ def _normalize_ingredient(name: str) -> str:
         "花菜": "菜花",
     }
     return aliases.get(name, name)
+
+
+def _ingredient_key(name: str) -> str:
+    """提取用于匹配的食材名，去掉常见用量后缀。"""
+    normalized = re.sub(r"\s+", "", _normalize_ingredient(name))
+    normalized = re.sub(r"[（(].*?[）)]", "", normalized)
+    unit_pattern = r"(?:克|g|kg|千克|斤|两|个|只|根|片|条|份|毫升|ml|升|包|袋|盒|瓶|罐)"
+    normalized = re.sub(rf"\d+(?:\.\d+)?{unit_pattern}.*$", "", normalized, flags=re.I)
+    normalized = re.sub(rf"(?:半|一|二|两|三|四|五|六|七|八|九|十)+{unit_pattern}.*$", "", normalized, flags=re.I)
+    normalized = re.sub(r"(?:少许|适量|若干)$", "", normalized)
+    return normalized.strip()
+
+
+def _is_basic_seasoning(name: str) -> bool:
+    key = _ingredient_key(name)
+    return key in BASIC_SEASONINGS
+
+
+def _main_ingredient_set(ingredients: List[str]) -> Set[str]:
+    return {
+        _ingredient_key(i)
+        for i in ingredients
+        if _ingredient_key(i) and not _is_basic_seasoning(i)
+    }
 
 
 def build_recipe_search_text(recipe: Dict[str, Any]) -> str:
@@ -60,11 +111,11 @@ def build_recipe_search_text(recipe: Dict[str, Any]) -> str:
 def _ingredient_overlap_score(
     user_ingredients: Set[str], recipe_ingredients: List[str]
 ) -> float:
-    """食材名匹配度：交集 / 菜谱所需食材数。"""
-    if not recipe_ingredients:
+    """食材名匹配度：交集 / 菜谱主食材数，基础调料不参与计算。"""
+    recipe_set = _main_ingredient_set(recipe_ingredients)
+    if not recipe_set:
         return 0.0
-    recipe_set = {_normalize_ingredient(i) for i in recipe_ingredients}
-    user_set = {_normalize_ingredient(i) for i in user_ingredients}
+    user_set = {_ingredient_key(i) for i in user_ingredients if _ingredient_key(i)}
     matched = recipe_set & user_set
     return len(matched) / len(recipe_set)
 
@@ -137,7 +188,7 @@ def match_recipes_by_ingredients(
     综合得分 = 食材匹配度 * 0.7 + 语义相似度 * 0.3
     返回结果按 score 降序，每项附带 match_score、matched_ingredients、missing_ingredients。
     """
-    user_set = {_normalize_ingredient(n) for n in user_ingredient_names if n.strip()}
+    user_set = {_ingredient_key(n) for n in user_ingredient_names if _ingredient_key(n)}
     if not user_set:
         return []
 
@@ -168,7 +219,7 @@ def match_recipes_by_ingredients(
         if total < min_score:
             continue
 
-        recipe_set = set(recipe_ings)
+        recipe_set = _main_ingredient_set(recipe_ings)
         matched = sorted(recipe_set & user_set)
         missing = sorted(recipe_set - user_set)
         item = dict(recipe)
