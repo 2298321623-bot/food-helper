@@ -2,6 +2,8 @@
 
 import logging
 
+import os
+
 import sys
 
 import threading
@@ -136,13 +138,19 @@ class LocalLLM(BaseLLM):
 
         model_file = _model_path_for_llama(self.model_path)
 
+        cpu = os.cpu_count() or 4
+
+        n_threads = max(2, min(cpu - 1, 8))
+
         return Llama(
 
             model_path=model_file,
 
             n_ctx=self.n_ctx,
 
-            n_threads=1,
+            n_threads=n_threads,
+
+            n_batch=256,
 
             use_mmap=False,
 
@@ -223,6 +231,12 @@ class LocalLLM(BaseLLM):
                 temperature=temperature,
 
                 top_p=top_p,
+
+                repeat_penalty=1.25,
+
+                frequency_penalty=0.4,
+
+                presence_penalty=0.2,
 
             )
 

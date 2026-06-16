@@ -37,6 +37,40 @@ def _to_ui_recipe(r: Dict[str, Any]) -> Dict[str, Any]:
 class RecipeService:
     def __init__(self):
         self.retriever = RecipeRetriever.from_json()
+        self._recipe_text_cache: Dict[str, str] = {}
+
+    @staticmethod
+    def _recipe_cache_key(
+        ingredient_names: List[str],
+        recipe_name: str,
+        diet: str,
+        cooking_time: str,
+        difficulty: str,
+        extra_requirements: str,
+    ) -> str:
+        ings = "|".join(sorted([(i or "").strip() for i in ingredient_names if i]))
+        return "||".join([
+            (recipe_name or "").strip(),
+            ings,
+            (diet or "").strip(),
+            (cooking_time or "").strip(),
+            (difficulty or "").strip(),
+            (extra_requirements or "").strip(),
+        ])
+
+    def get_cached_recipe_text(
+        self,
+        ingredient_names: List[str],
+        recipe_name: str = "",
+        diet: str = "",
+        cooking_time: str = "",
+        difficulty: str = "",
+        extra_requirements: str = "",
+    ) -> Optional[str]:
+        key = self._recipe_cache_key(
+            ingredient_names, recipe_name, diet, cooking_time, difficulty, extra_requirements
+        )
+        return self._recipe_text_cache.get(key)
 
     def search_by_ingredients(
         self,
@@ -102,6 +136,13 @@ class RecipeService:
             requirements_parts.append(extra_requirements)
         merged_req = "；".join(requirements_parts) if requirements_parts else ""
 
+        cache_key = self._recipe_cache_key(
+            ingredient_names, recipe_name, diet, cooking_time, difficulty, extra_requirements
+        )
+        cached = self._recipe_text_cache.get(cache_key)
+        if cached:
+            return cached
+
         matches = self.search_by_ingredients(ingredient_names, top_k=3)
         hint = ""
         name = recipe_name
@@ -117,12 +158,15 @@ class RecipeService:
                 f"参考步骤：{steps_text}"
             )
 
-        return generate_recipe_with_fallback(
+        result = generate_recipe_with_fallback(
             ingredient_names,
             reference_hint=hint,
             extra_requirements=merged_req,
             recipe_name=name,
         )
+        if result and result.strip():
+            self._recipe_text_cache[cache_key] = result
+        return result
 
     def brainstorm_recipe_ideas(
         self,

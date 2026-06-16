@@ -67,6 +67,74 @@ QFrame#toolbarCard {
     background-color: #ffffff;
 }
 
+QFrame#heroCard {
+    background-color: #0f766e;
+    border: 1px solid #0d9488;
+    border-radius: 18px;
+}
+
+QLabel#heroTitle {
+    font-size: 24px;
+    font-weight: 800;
+    color: #ffffff;
+    background: transparent;
+}
+
+QLabel#heroSubtitle {
+    font-size: 13px;
+    color: #ccfbf1;
+    line-height: 1.6;
+    background: transparent;
+}
+
+QLabel#heroChip {
+    background-color: rgba(255, 255, 255, 0.16);
+    color: #ffffff;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 14px;
+    padding: 8px 14px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+QFrame#metricCard {
+    background-color: #ffffff;
+    border: 1px solid #e5eaef;
+    border-radius: 16px;
+}
+
+QFrame#metricCard:hover {
+    border-color: #99f6e4;
+    background-color: #fafffe;
+}
+
+QLabel#metricTitle {
+    color: #475569;
+    font-size: 13px;
+    font-weight: 700;
+    background: transparent;
+}
+
+QLabel#metricValue {
+    color: #0f766e;
+    font-size: 30px;
+    font-weight: 800;
+    background: transparent;
+}
+
+QLabel#metricDesc {
+    color: #64748b;
+    font-size: 12px;
+    background: transparent;
+}
+
+QLabel#sectionTitle {
+    color: #0f766e;
+    font-size: 15px;
+    font-weight: 800;
+    background: transparent;
+}
+
 QWidget#loginContainer {
     background-color: #ffffff;
     border: 1px solid #e2e8f0;
@@ -260,9 +328,38 @@ QTableWidget QPushButton,
 QPushButton#tableActionBtn {
     min-height: 0;
     max-height: 24px;
-    padding: 2px 10px;
+    padding: 2px 6px;
     font-size: 12px;
     border-radius: 6px;
+}
+
+QPushButton#tableEditBtn {
+    min-height: 0;
+    max-height: 24px;
+    padding: 2px 6px;
+    font-size: 12px;
+    border-radius: 6px;
+    background-color: #ffffff;
+    color: #0d9488;
+    border: 1px solid #0d9488;
+    font-weight: 600;
+}
+QPushButton#tableEditBtn:hover { background-color: #ccfbf1; }
+
+QPushButton#tableDeleteBtn {
+    min-height: 0;
+    max-height: 24px;
+    padding: 2px 6px;
+    font-size: 12px;
+    border-radius: 6px;
+    background-color: #fff1f2;
+    color: #be123c;
+    border: 1px solid #fecdd3;
+    font-weight: 500;
+}
+QPushButton#tableDeleteBtn:hover {
+    background-color: #ffe4e6;
+    border-color: #fda4af;
 }
 
 /* ============ 表格 ============ */
@@ -321,6 +418,13 @@ QTextEdit {
 }
 
 QTextEdit:focus { border: 1px solid #14b8a6; }
+
+QTextEdit#dashboardTextBox {
+    background-color: #f8fafc;
+    border: 1px solid #edf2f7;
+    color: #334155;
+    line-height: 1.7;
+}
 
 QListWidget {
     border: 1px solid #e5eaef;

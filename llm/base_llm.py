@@ -36,4 +36,4 @@ class BaseLLM(ABC):
             extra_requirements=extra_requirements,
             recipe_name=recipe_name,
         )
-        return self.generate(user_prompt, system=RECIPE_SYSTEM_PROMPT)
+        return self.generate(user_prompt, system=RECIPE_SYSTEM_PROMPT, max_tokens=360)

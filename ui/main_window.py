@@ -101,6 +101,7 @@ class MainWindow(QTabWidget):
         }
         self.init_window()
         self._load_from_db()   # 从数据库加载用户数据
+        self.init_dashboard_tab()
         self.init_ingredient_tab()
         self.init_recipe_tab()
         self.init_shop_tab()
@@ -203,8 +204,168 @@ class MainWindow(QTabWidget):
                 self._refresh_ingredient_picker()
         elif hasattr(self, "stats_tab") and widget is self.stats_tab:
             self.refresh_stats_view()
+        elif hasattr(self, "dashboard_tab") and widget is self.dashboard_tab:
+            self.refresh_dashboard_view()
         elif hasattr(self, "admin_tab") and widget is self.admin_tab:
             self.refresh_admin_view()
+
+    def init_dashboard_tab(self) -> None:
+        """首页总览：把库存、临期、购物和 AI 状态汇总成产品化入口。"""
+        self.dashboard_tab = QWidget()
+        root = QVBoxLayout(self.dashboard_tab)
+        root.setContentsMargins(24, 18, 24, 24)
+        root.setSpacing(14)
+
+        hero = QFrame()
+        hero.setObjectName("heroCard")
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(24, 22, 24, 22)
+        hero_layout.setSpacing(18)
+
+        hero_text = QVBoxLayout()
+        hero_title = QLabel("家庭食材管理与智能食谱助手")
+        hero_title.setObjectName("heroTitle")
+        hero_subtitle = QLabel(
+            "从冰箱库存到智能菜谱、购物清单、营养统计，形成完整的 Python + AI 家庭饮食管理闭环。"
+        )
+        hero_subtitle.setObjectName("heroSubtitle")
+        hero_subtitle.setWordWrap(True)
+        hero_text.addWidget(hero_title)
+        hero_text.addWidget(hero_subtitle)
+        hero_text.addStretch()
+
+        hero_actions = QHBoxLayout()
+        btn_to_recipe = QPushButton("生成今日菜谱")
+        btn_to_recipe.setObjectName("primaryBtn")
+        btn_to_recipe.clicked.connect(lambda: self.setCurrentWidget(self.recipe_tab))
+        btn_to_inventory = QPushButton("管理库存")
+        btn_to_inventory.setObjectName("secondaryBtn")
+        btn_to_inventory.clicked.connect(lambda: self.setCurrentWidget(self.ingredient_tab))
+        hero_actions.addWidget(btn_to_recipe)
+        hero_actions.addWidget(btn_to_inventory)
+        hero_actions.addStretch()
+        hero_text.addLayout(hero_actions)
+
+        self.dashboard_ai_chip = QLabel("AI 引擎 · 检测中")
+        self.dashboard_ai_chip.setObjectName("heroChip")
+        hero_layout.addLayout(hero_text, 1)
+        hero_layout.addWidget(self.dashboard_ai_chip)
+        root.addWidget(hero)
+
+        metrics_grid = QGridLayout()
+        metrics_grid.setSpacing(12)
+        self.dashboard_metric_cards: dict[str, QLabel] = {}
+        metric_defs = [
+            ("pantry", "库存食材", "0", "当前已入库的食材种类", "🥬"),
+            ("expiring", "临期提醒", "0", "3 天内到期或已过期", "⏰"),
+            ("shopping", "待购清单", "0", "尚未购买的购物项", "🛒"),
+            ("recipe", "推荐菜谱", "0", "本地菜谱库可推荐数量", "🍳"),
+        ]
+        for idx, (key, title, value, desc, icon) in enumerate(metric_defs):
+            card = self._create_dashboard_metric_card(key, title, value, desc, icon)
+            metrics_grid.addWidget(card, idx // 4, idx % 4)
+        root.addLayout(metrics_grid)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(12)
+        self.dashboard_expiry_box = QTextEdit()
+        self.dashboard_expiry_box.setObjectName("dashboardTextBox")
+        self.dashboard_expiry_box.setReadOnly(True)
+        self.dashboard_expiry_box.setMinimumHeight(180)
+        self.dashboard_expiry_box.setPlaceholderText("暂无临期提醒")
+
+        self.dashboard_flow_box = QTextEdit()
+        self.dashboard_flow_box.setObjectName("dashboardTextBox")
+        self.dashboard_flow_box.setReadOnly(True)
+        self.dashboard_flow_box.setMinimumHeight(180)
+
+        bottom.addWidget(self._wrap_dashboard_panel("临期食材提醒", self.dashboard_expiry_box), 1)
+        bottom.addWidget(self._wrap_dashboard_panel("系统亮点流程", self.dashboard_flow_box), 1)
+        root.addLayout(bottom, 1)
+
+        self.addTab(self.dashboard_tab, "首页总览")
+        self.refresh_dashboard_view()
+
+    def _create_dashboard_metric_card(
+        self, key: str, title: str, value: str, desc: str, icon: str
+    ) -> QFrame:
+        card = QFrame()
+        card.setObjectName("metricCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(6)
+        title_label = QLabel(f"{icon} {title}")
+        title_label.setObjectName("metricTitle")
+        value_label = QLabel(value)
+        value_label.setObjectName("metricValue")
+        desc_label = QLabel(desc)
+        desc_label.setObjectName("metricDesc")
+        desc_label.setWordWrap(True)
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        layout.addWidget(desc_label)
+        self.dashboard_metric_cards[key] = value_label
+        return card
+
+    @staticmethod
+    def _wrap_dashboard_panel(title: str, widget: QWidget) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("contentCard")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(8)
+        label = QLabel(title)
+        label.setObjectName("sectionTitle")
+        layout.addWidget(label)
+        layout.addWidget(widget, 1)
+        return panel
+
+    def refresh_dashboard_view(self) -> None:
+        if not hasattr(self, "dashboard_metric_cards"):
+            return
+        today = datetime.now().date()
+        expiring = []
+        for item in self.ingredients:
+            normalized = normalize_pantry_item(dict(item))
+            days_left = (normalized["expiry"] - today).days
+            if days_left <= 3:
+                expiring.append((days_left, normalized))
+        expiring.sort(key=lambda x: x[0])
+        pending_shop = sum(1 for it in self.shopping_items if not it.get("bought"))
+
+        self.dashboard_metric_cards["pantry"].setText(str(len(self.ingredients)))
+        self.dashboard_metric_cards["expiring"].setText(str(len(expiring)))
+        self.dashboard_metric_cards["shopping"].setText(str(pending_shop))
+        self.dashboard_metric_cards["recipe"].setText(str(len(self.recipes)))
+
+        if expiring:
+            lines = []
+            for days_left, item in expiring[:8]:
+                if days_left < 0:
+                    status = f"已过期 {abs(days_left)} 天"
+                elif days_left == 0:
+                    status = "今天到期"
+                else:
+                    status = f"还剩 {days_left} 天"
+                lines.append(
+                    f"• {item['name']}（{format_amount_display(item['amount'], item['unit'])}）：{status}"
+                )
+            self.dashboard_expiry_box.setPlainText("\n".join(lines))
+        else:
+            self.dashboard_expiry_box.setPlainText(
+                "当前没有 3 天内到期的食材。\n保持库存新鲜，推荐先用临期食材生成菜谱。"
+            )
+
+        self.dashboard_flow_box.setPlainText(
+            "1. 食材入库：录入数量、保质期和存放位置。\n"
+            "2. RAG 推荐：根据现有库存匹配本地菜谱库。\n"
+            "3. AI 生成：本地 Qwen 生成可照做的菜谱详情。\n"
+            "4. 购物联动：缺少食材一键加入购物清单。\n"
+            "5. 做完扣减：按份数扣减库存并进入营养统计。"
+        )
+
+        if hasattr(self, "dashboard_ai_chip") and hasattr(self, "llm_status_label"):
+            self.dashboard_ai_chip.setText(self.llm_status_label.text())
 
     def _maybe_show_expiry_alert_once(self):
         if self._expiry_alert_checked_this_session:
@@ -272,7 +433,7 @@ class MainWindow(QTabWidget):
         for col in range(5):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        self.ingredient_table.setColumnWidth(5, 128)
+        self.ingredient_table.setColumnWidth(5, 156)
 
         self.btn_add_ingredient = QPushButton("添加食材")
         self.btn_add_ingredient.setObjectName("primaryBtn") # 赋予主操作绿色
@@ -506,19 +667,19 @@ class MainWindow(QTabWidget):
             op_container = QWidget()
             op_container.setStyleSheet("background: transparent;")
             op_layout = QHBoxLayout(op_container)
-            op_layout.setContentsMargins(2, 4, 4, 4)
-            op_layout.setSpacing(4)
+            op_layout.setContentsMargins(4, 4, 4, 4)
+            op_layout.setSpacing(8)
             op_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
             edit_btn = QPushButton("编辑")
-            edit_btn.setObjectName("secondaryBtn")
-            edit_btn.setFixedSize(48, 24)
+            edit_btn.setObjectName("tableEditBtn")
+            edit_btn.setFixedSize(58, 24)
             edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             edit_btn.clicked.connect(
                 lambda _checked, r=row: self.show_add_ingredient_dialog(edit_row=r)
             )
             delete_btn = QPushButton("删除")
-            delete_btn.setObjectName("dangerBtn")
-            delete_btn.setFixedSize(48, 24)
+            delete_btn.setObjectName("tableDeleteBtn")
+            delete_btn.setFixedSize(58, 24)
             delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             delete_btn.clicked.connect(lambda _checked, r=row: self.delete_ingredient(r))
             op_layout.addWidget(edit_btn)
@@ -544,6 +705,7 @@ class MainWindow(QTabWidget):
 
         if show_expiry_alert:
             self.check_expiry_alert()
+        self.refresh_dashboard_view()
 
     # (delete_ingredient, remove_selected_ingredient, check_expiry_alert 保持原样不变...)
     def delete_ingredient(self, row):
@@ -764,16 +926,18 @@ class MainWindow(QTabWidget):
             QMessageBox.information(self, "朗读步骤", "请先在左侧选择一道菜谱。")
             self.btn_speak_recipe.setChecked(False)
             return
-        steps = recipe.get("steps") or []
-        if not steps:
-            # 没有结构化步骤就退化为读详情区文本
-            text = self.recipe_detail.toPlainText().strip()
-            if not text:
+        text = self.recipe_detail.toPlainText().strip()
+        if text:
+            # 优先朗读用户当前看到的详情内容，确保 AI 生成后读的是 AI 菜谱。
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            text = text.replace("AI 生成菜谱", "").strip()
+            speak_text = f"开始朗读 {recipe.get('name', '当前菜谱')}。{text}"
+        else:
+            steps = recipe.get("steps") or []
+            if not steps:
                 QMessageBox.information(self, "朗读步骤", "当前菜谱没有可朗读的步骤内容。")
                 self.btn_speak_recipe.setChecked(False)
                 return
-            speak_text = text
-        else:
             speak_text = f"开始烹饪 {recipe.get('name', '菜谱')}。"
             for idx, s in enumerate(steps, 1):
                 speak_text += f"第 {idx} 步，{s}。"
@@ -1267,8 +1431,8 @@ class MainWindow(QTabWidget):
             self.recipe_list.setCurrentRow(0)
             self._active_recipe_for_cooking = results[0]
             self._update_mark_cooked_button_state()
-            # 方案 C：RAG 匹配的 Top1 作为参考，立刻让 AI 生成完整菜谱
-            self.start_ai_recipe_generation(auto=True)
+            # 先显示本地 RAG 菜谱详情，避免每次推荐都等待本地 LLM 冷启动。
+            self.show_recipe_detail(self.recipe_list.item(0))
         else:
             self.recipe_list.addItem("⚠️ 未找到匹配食谱，请调整食材或筛选条件")
             self.recipe_detail.clear()
@@ -1300,6 +1464,21 @@ class MainWindow(QTabWidget):
         time = self.time_box.currentText()
         diff = self.diff_box.currentText()
 
+        from services.recipe_service import get_recipe_service
+
+        svc = get_recipe_service()
+
+        cached = svc.get_cached_recipe_text(
+            ingredient_names,
+            recipe_name=recipe_name,
+            diet=diet,
+            cooking_time=time,
+            difficulty=diff,
+        )
+        if cached:
+            self._on_ai_recipe_ready(cached)
+            return
+
         self.btn_ai_recipe.setEnabled(False)
         if hasattr(self, "btn_generate_recipe"):
             self.btn_generate_recipe.setEnabled(False)
@@ -1307,10 +1486,6 @@ class MainWindow(QTabWidget):
         if recipe_name:
             hint = f"⏳ AI 正在为「{recipe_name}」生成完整菜谱，请稍候…"
         self.recipe_detail.setPlainText(hint)
-
-        from services.recipe_service import get_recipe_service
-
-        svc = get_recipe_service()
 
         def task():
             return svc.generate_recipe_text(
@@ -1342,10 +1517,11 @@ class MainWindow(QTabWidget):
             else text
         )
         nutrition_html = self._build_ai_nutrition_html(nutrition)
+        body_html = self._markdown_to_html(display_text)
         html = (
-            "<h2 style='color:#0d9488;'>AI 生成菜谱</h2>"
-            f"<pre style='white-space:pre-wrap; font-family:Microsoft YaHei, sans-serif;"
-            f" line-height:1.7; color:#333;'>{self._escape_html(display_text)}</pre>"
+            "<h2 style='color:#0d9488; margin:0 0 8px 0;'>AI 生成菜谱</h2>"
+            f"<div style='font-family:Microsoft YaHei, sans-serif;"
+            f" line-height:1.8; color:#333; font-size:14px;'>{body_html}</div>"
             f"{nutrition_html}"
         )
         self.recipe_detail.setHtml(html)
@@ -1378,6 +1554,100 @@ class MainWindow(QTabWidget):
             .replace("<", "&lt;")
             .replace(">", "&gt;")
         )
+
+    @classmethod
+    def _markdown_to_html(cls, text: str) -> str:
+        """将 AI 输出的简易 Markdown 转换为美观的 HTML（标题/列表/加粗）。"""
+        import re
+
+        if not text:
+            return ""
+
+        lines = text.replace("\r\n", "\n").split("\n")
+        html_parts: list[str] = []
+        in_ul = False
+        in_ol = False
+
+        def close_lists():
+            nonlocal in_ul, in_ol
+            if in_ul:
+                html_parts.append("</ul>")
+                in_ul = False
+            if in_ol:
+                html_parts.append("</ol>")
+                in_ol = False
+
+        def inline(s: str) -> str:
+            s = cls._escape_html(s)
+            s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s)
+            s = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", s)
+            s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+            return s
+
+        heading_styles = {
+            1: "color:#0d9488; font-size:20px; margin:14px 0 8px 0;",
+            2: "color:#0d9488; font-size:18px; margin:12px 0 6px 0;",
+            3: "color:#0f766e; font-size:16px; margin:10px 0 6px 0;"
+                " border-left:4px solid #0d9488; padding-left:8px;",
+            4: "color:#115e59; font-size:15px; margin:8px 0 4px 0; font-weight:bold;",
+            5: "color:#115e59; font-size:14px; margin:6px 0 4px 0; font-weight:bold;",
+            6: "color:#115e59; font-size:14px; margin:6px 0 4px 0; font-weight:bold;",
+        }
+
+        for raw in lines:
+            line = raw.rstrip()
+            if not line.strip():
+                close_lists()
+                html_parts.append("<div style='height:6px;'></div>")
+                continue
+
+            m = re.match(r"^(#{1,6})\s+(.+)$", line)
+            if m:
+                close_lists()
+                level = len(m.group(1))
+                style = heading_styles.get(level, heading_styles[4])
+                html_parts.append(
+                    f"<div style='{style}'>{inline(m.group(2).strip())}</div>"
+                )
+                continue
+
+            m = re.match(r"^\s*[-*•]\s+(.+)$", line)
+            if m:
+                if in_ol:
+                    html_parts.append("</ol>")
+                    in_ol = False
+                if not in_ul:
+                    html_parts.append(
+                        "<ul style='margin:4px 0 4px 20px; padding-left:16px;'>"
+                    )
+                    in_ul = True
+                html_parts.append(
+                    f"<li style='margin:3px 0;'>{inline(m.group(1).strip())}</li>"
+                )
+                continue
+
+            m = re.match(r"^\s*\d+[\.、)]\s*(.+)$", line)
+            if m:
+                if in_ul:
+                    html_parts.append("</ul>")
+                    in_ul = False
+                if not in_ol:
+                    html_parts.append(
+                        "<ol style='margin:4px 0 4px 20px; padding-left:16px;'>"
+                    )
+                    in_ol = True
+                html_parts.append(
+                    f"<li style='margin:3px 0;'>{inline(m.group(1).strip())}</li>"
+                )
+                continue
+
+            close_lists()
+            html_parts.append(
+                f"<p style='margin:4px 0;'>{inline(line.strip())}</p>"
+            )
+
+        close_lists()
+        return "".join(html_parts)
 
     @staticmethod
     def _extract_nutrition_from_ai_text(text: str) -> dict:
@@ -1524,40 +1794,68 @@ class MainWindow(QTabWidget):
 
     def show_recipe_detail(self, item):
         recipe = item.data(Qt.ItemDataRole.UserRole)
-        if recipe:
-            self._active_recipe_for_cooking = recipe
-            self._update_mark_cooked_button_state()
-            ingredients = "、".join(recipe.get("ingredients", []))
-            score_line = ""
-            if recipe.get("match_score") is not None:
-                score_line = f"<p><b>匹配度：</b>{recipe['match_score']:.0%}</p>"
-            missing = recipe.get("missing_ingredients") or []
-            missing_line = ""
-            if missing:
-                missing_line = (
-                    f"<p style='color:#c0392b;'><b>还缺食材：</b>"
-                    f"{'、'.join(missing)}</p>"
-                )
-            steps = recipe.get("steps") or []
-            steps_html = ""
-            if steps:
-                steps_html = "<ol>" + "".join(
-                    f"<li style='margin:4px 0;'>{s}</li>" for s in steps
-                ) + "</ol>"
-            else:
-                steps_html = (
-                    f"<p style='line-height:1.8; color:#555555;'>{recipe.get('description', '')}</p>"
-                )
-            self.recipe_detail.setHtml(
-                f"<h2 style='color:#0d9488;'>{recipe['name']}</h2>"
-                f"<p><b>推荐标签：</b><span style='color:#e67e22;'>{','.join(recipe.get('tags', []))}</span> | "
-                f"<b>烹饪时间：</b>{recipe.get('time', '')} | <b>难度：</b>{recipe.get('diff', '')}</p>"
-                f"{score_line}{missing_line}"
-                f"<hr style='border:none; border-top:1px solid #E4E7ED;'>"
-                f"<h3>🛒 所需食材：</h3><p style='line-height:1.6;'>{ingredients}</p>"
-                f"<h3>📝 烹饪步骤：</h3>{steps_html}"
-                f"<p style='color:#888; font-size:12px;'>选中此菜后点击「AI 重新生成」，可针对该菜重新调用 AI 生成。</p>"
+        if not recipe:
+            return
+        self._active_recipe_for_cooking = recipe
+        self._update_mark_cooked_button_state()
+        ingredient_names = self._ingredient_names_for_recipe()
+        try:
+            from services.recipe_service import get_recipe_service
+
+            cached = get_recipe_service().get_cached_recipe_text(
+                ingredient_names,
+                recipe_name=recipe.get("name", ""),
+                diet=self.diet_box.currentText(),
+                cooking_time=self.time_box.currentText(),
+                difficulty=self.diff_box.currentText(),
             )
+        except Exception:
+            cached = None
+        if cached:
+            self._on_ai_recipe_ready(cached)
+            return
+        ingredients = "、".join(recipe.get("ingredients", []))
+        score_line = ""
+        if recipe.get("match_score") is not None:
+            score_line = (
+                f"<p style='margin:4px 0;'><b>匹配度：</b>"
+                f"<span style='color:#0d9488;'>{recipe['match_score']:.0%}</span></p>"
+            )
+        missing = recipe.get("missing_ingredients") or []
+        missing_line = ""
+        if missing:
+            missing_line = (
+                f"<p style='color:#c0392b; margin:4px 0;'><b>还缺食材：</b>"
+                f"{'、'.join(missing)}</p>"
+            )
+        steps = recipe.get("steps") or []
+        if steps:
+            steps_html = (
+                "<ol style='margin:4px 0 4px 20px; padding-left:16px;'>"
+                + "".join(f"<li style='margin:3px 0;'>{s}</li>" for s in steps)
+                + "</ol>"
+            )
+        else:
+            steps_html = (
+                f"<p style='line-height:1.8; color:#555555;'>"
+                f"{recipe.get('description', '')}</p>"
+            )
+        tags_html = ",".join(recipe.get("tags", []))
+        self.recipe_detail.setHtml(
+            f"<h2 style='color:#0d9488; margin:0 0 8px 0;'>{recipe['name']}</h2>"
+            f"<p style='margin:4px 0;'><b>推荐标签：</b>"
+            f"<span style='color:#e67e22;'>{tags_html}</span> | "
+            f"<b>烹饪时间：</b>{recipe.get('time', '')} | "
+            f"<b>难度：</b>{recipe.get('diff', '')}</p>"
+            f"{score_line}{missing_line}"
+            f"<hr style='border:none; border-top:1px solid #E4E7ED;'>"
+            f"<h3 style='color:#0f766e; margin:10px 0 4px 0;'>🛒 所需食材</h3>"
+            f"<p style='line-height:1.6; margin:4px 0;'>{ingredients}</p>"
+            f"<h3 style='color:#0f766e; margin:10px 0 4px 0;'>📝 烹饪步骤</h3>"
+            f"{steps_html}"
+            f"<p style='color:#888; font-size:12px; margin-top:10px;'>"
+            f"这是本地菜谱库详情。需要更完整的 AI 版本时，点击上方「AI 重新生成」。</p>"
+        )
 
     # (购物清单与饮食知识库选项卡直接复用精细化间距规则...)
     # 超市动线分区映射（创新点：按动线排序，少走冤枉路）
@@ -1771,6 +2069,7 @@ class MainWindow(QTabWidget):
             )
             cb_layout.addWidget(checkbox)
             self.shop_table.setCellWidget(row, 4, cb_wrap)
+        self.refresh_dashboard_view()
 
     def _row_to_item_index(self, row: int) -> int:
         """显示行号 -> 真实 self.shopping_items 索引。"""
@@ -1844,7 +2143,7 @@ class MainWindow(QTabWidget):
     def init_knowledge_tab(self):
         self.knowledge_tab = QWidget()
         self.knowledge_nav = QListWidget()
-        self.knowledge_nav.addItems(list(self.knowledge_books.keys()))
+        self.knowledge_nav.addItems(["AI 对话"] + list(self.knowledge_books.keys()))
         self.knowledge_nav.setFixedWidth(220)
         self.knowledge_nav.currentRowChanged.connect(self.update_knowledge_content)
         self.knowledge_content = QTextEdit()
@@ -1910,6 +2209,9 @@ class MainWindow(QTabWidget):
             self.knowledge_content.clear()
             return
         key = self.knowledge_nav.item(index).text()
+        if key == "AI 对话":
+            self._render_knowledge_history()
+            return
         self.knowledge_content.setHtml(
             f"<h3 style='color:#0d9488; margin-top:0;'>{key}</h3>"
             f"<p style='line-height:1.8; color:#475569;'>{self.knowledge_books.get(key, '').replace(chr(10), '<br>')}</p>"
@@ -1920,6 +2222,7 @@ class MainWindow(QTabWidget):
         self._knowledge_history = []
         self.knowledge_search_status.setText("对话已清除")
         self.knowledge_content.setPlainText("对话已重置，请输入新问题。")
+        self.knowledge_nav.setCurrentRow(0)
 
     def search_food_shelf_life(self):
         query = self.knowledge_search_edit.text().strip()
@@ -1927,6 +2230,7 @@ class MainWindow(QTabWidget):
             QMessageBox.information(self, "提示", "请输入要查询的内容。")
             return
 
+        self.knowledge_nav.setCurrentRow(0)
         self.btn_knowledge_search.setEnabled(False)
         self.knowledge_search_status.setText("AI 正在思考…")
         # 将用户消息追加到历史
@@ -1939,15 +2243,16 @@ class MainWindow(QTabWidget):
 
         def task():
             from fallback.llm import get_llm
-            llm = get_llm()
+            llm = get_llm(prefer_local=False)
             system_msg = (
-                "你是家庭食材保存与饮食知识助手，回答要简洁、实用、适合家庭日常使用。"
-                "如果用户在追问，请结合上下文给出连贯回答。"
+                "你是家庭食材保存与饮食知识助手。回答必须简短、准确、适合家庭日常。"
+                "最多 4 条要点，每条不超过 25 字；不要重复同一句；不确定时提醒查看包装标识。"
+                "如果用户在追问，请结合上下文回答。"
             )
             # 尝试使用多轮消息接口；不支持时退回单条 generate
             try:
                 messages = [{"role": "system", "content": system_msg}] + history_snapshot
-                return llm._chat_completion(messages, max_tokens=600)
+                return llm._chat_completion(messages, max_tokens=220, temperature=0.2)
             except (AttributeError, TypeError):
                 # 本地 LLM 不支持 _chat_completion，降级为单轮
                 ctx = ""
@@ -1955,7 +2260,12 @@ class MainWindow(QTabWidget):
                     role = "用户" if m["role"] == "user" else "助手"
                     ctx += f"{role}：{m['content']}\n"
                 prompt = (ctx + f"用户：{query}\n助手：") if ctx else query
-                return llm.generate(prompt, system=system_msg, max_tokens=600)
+                return llm.generate(
+                    prompt,
+                    system=system_msg,
+                    max_tokens=220,
+                    temperature=0.2,
+                )
 
         worker = Worker(task)
         worker.signals.result.connect(
@@ -1970,9 +2280,41 @@ class MainWindow(QTabWidget):
 
     def _on_shelf_life_ready(self, query: str, text: str):
         # 将 AI 回复也加入历史
+        text = self._clean_ai_short_answer(text)
         self._knowledge_history.append({"role": "assistant", "content": text})
         self.knowledge_search_status.setText(f"对话 {len(self._knowledge_history) // 2} 轮")
+        self._render_knowledge_history()
+
+    @staticmethod
+    def _clean_ai_short_answer(text: str) -> str:
+        """清理本地小模型偶发的长重复片段，保证知识问答适合展示。"""
+        if not text:
+            return ""
+        text = re.sub(r"\s+", " ", text).strip()
+        parts = re.split(r"[；;。]\s*", text)
+        cleaned = []
+        seen = set()
+        for part in parts:
+            part = part.strip(" ，,。；;")
+            if not part:
+                continue
+            key = part[:18]
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(part)
+            if len(cleaned) >= 4:
+                break
+        return "。\n".join(cleaned) + ("。" if cleaned else "")
+
+    def _render_knowledge_history(self) -> None:
         # 构建多轮对话展示 HTML
+        if not self._knowledge_history:
+            self.knowledge_content.setHtml(
+                "<h3 style='color:#0d9488; margin-top:0;'>AI 对话</h3>"
+                "<p style='line-height:1.8; color:#64748b;'>输入问题后，AI 问答会保留在这里。</p>"
+            )
+            return
         html_parts = []
         for msg in self._knowledge_history:
             role = msg["role"]
@@ -2465,9 +2807,13 @@ class MainWindow(QTabWidget):
             )
             self.llm_status_label.style().unpolish(self.llm_status_label)
             self.llm_status_label.style().polish(self.llm_status_label)
+            if hasattr(self, "dashboard_ai_chip"):
+                self.dashboard_ai_chip.setText(text)
         except Exception as e:
             self.llm_status_label.setText("AI 引擎 · 未知")
             self.llm_status_label.setToolTip(str(e))
+            if hasattr(self, "dashboard_ai_chip"):
+                self.dashboard_ai_chip.setText("AI 引擎 · 未知")
 
     def init_stats_tab(self) -> None:
         import matplotlib
