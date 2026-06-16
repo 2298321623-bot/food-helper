@@ -1,4 +1,7 @@
-"""下载 Qwen2.5-1.5B-Instruct Q4_0 GGUF 模型（组员 C Day3-4），支持断点续传。"""
+"""下载 Qwen2.5-1.5B-Instruct GGUF 模型，支持 q4_0 / q8_0 与断点续传。"""
+from __future__ import annotations
+
+import argparse
 import sys
 import urllib.request
 from pathlib import Path
@@ -6,12 +9,24 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from config import LLM_MODEL_FILE
+from config import LLM_MODEL_DIR, LLM_MODEL_FILE
 
-MODEL_URL = (
-    "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/"
-    "resolve/main/qwen2.5-1.5b-instruct-q4_0.gguf"
-)
+MODEL_VARIANTS = {
+    "q4_0": {
+        "filename": "qwen2.5-1.5b-instruct-q4_0.gguf",
+        "url": (
+            "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/"
+            "resolve/main/qwen2.5-1.5b-instruct-q4_0.gguf"
+        ),
+    },
+    "q8_0": {
+        "filename": "qwen2.5-1.5b-instruct-q8_0.gguf",
+        "url": (
+            "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/"
+            "resolve/main/qwen2.5-1.5b-instruct-q8_0.gguf"
+        ),
+    },
+}
 
 CHUNK = 1024 * 256
 
@@ -22,8 +37,21 @@ def _remote_size(url: str) -> int:
         return int(resp.headers.get("Content-Length", 0))
 
 
-def download(url: str = MODEL_URL, dest: Path = LLM_MODEL_FILE):
-    dest = Path(dest)
+def resolve_variant_dest(variant: str) -> Path:
+    if variant not in MODEL_VARIANTS:
+        raise ValueError(f"不支持的模型变体：{variant}")
+    if variant == "q4_0":
+        return Path(LLM_MODEL_FILE)
+    return Path(LLM_MODEL_DIR) / MODEL_VARIANTS[variant]["filename"]
+
+
+def download(*, variant: str = "q4_0", url: str | None = None, dest: Path | None = None) -> Path:
+    if variant not in MODEL_VARIANTS:
+        raise ValueError(f"不支持的模型变体：{variant}")
+
+    meta = MODEL_VARIANTS[variant]
+    url = url or meta["url"]
+    dest = Path(dest) if dest else resolve_variant_dest(variant)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     total_size = _remote_size(url)
@@ -32,7 +60,7 @@ def download(url: str = MODEL_URL, dest: Path = LLM_MODEL_FILE):
 
     downloaded = dest.stat().st_size if dest.exists() else 0
     if downloaded >= total_size:
-        print(f"模型已完整存在（{downloaded / (1024**2):.1f} MB）：{dest}")
+        print(f"{variant} 模型已完整存在（{downloaded / (1024**2):.1f} MB）：{dest}")
         return dest
 
     if downloaded > total_size:
@@ -41,9 +69,12 @@ def download(url: str = MODEL_URL, dest: Path = LLM_MODEL_FILE):
         downloaded = 0
 
     if downloaded > 0:
-        print(f"断点续传：已有 {downloaded / (1024**2):.1f} MB / {total_size / (1024**2):.1f} MB")
+        print(
+            f"{variant} 断点续传：已有 "
+            f"{downloaded / (1024**2):.1f} MB / {total_size / (1024**2):.1f} MB"
+        )
     else:
-        print(f"开始下载（约 {total_size / (1024**3):.1f} GB）→ {dest}")
+        print(f"开始下载 {variant}（约 {total_size / (1024**3):.2f} GB）→ {dest}")
     print(f"来源：{url}")
 
     req = urllib.request.Request(url)
@@ -76,5 +107,15 @@ def download(url: str = MODEL_URL, dest: Path = LLM_MODEL_FILE):
     return dest
 
 
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--variant", choices=sorted(MODEL_VARIANTS.keys()), default="q4_0")
+    parser.add_argument("--dest")
+    args = parser.parse_args()
+
+    dest = Path(args.dest) if args.dest else None
+    download(variant=args.variant, dest=dest)
+
+
 if __name__ == "__main__":
-    download()
+    main()
