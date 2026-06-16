@@ -1,0 +1,5 @@
+﻿format,bits_per_param,size_mb,compress_ratio
+FP32(原始),32,5722.0,1.0
+FP16(半精度),16,2861.0,2.0
+Q8_0(8bit量化),8,1430.5,4.0
+Q4_0(4bit量化-实测),4,1016.8,5.63
