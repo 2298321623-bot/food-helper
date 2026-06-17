@@ -2,7 +2,10 @@
 import os
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+from app_paths import BASE_DIR
+
+# 源码运行时为项目根目录；打包(exe)运行时为 exe 所在目录（与 models/、data/ 同级）
+PROJECT_ROOT = BASE_DIR
 
 # 本地 GGUF 模型（Day3-4：需运行 scripts/download_qwen_model.py 下载）
 # 可通过环境变量 FOOD_HELPER_MODEL 指定无中文路径的模型文件（Windows 推荐）

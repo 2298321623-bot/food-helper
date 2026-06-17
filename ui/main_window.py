@@ -259,7 +259,6 @@ class MainWindow(QTabWidget):
             ("pantry", "库存食材", "0", "当前已入库的食材种类", "🥬"),
             ("expiring", "临期提醒", "0", "3 天内到期或已过期", "⏰"),
             ("shopping", "待购清单", "0", "尚未购买的购物项", "🛒"),
-            ("recipe", "推荐菜谱", "0", "本地菜谱库可推荐数量", "🍳"),
         ]
         for idx, (key, title, value, desc, icon) in enumerate(metric_defs):
             card = self._create_dashboard_metric_card(key, title, value, desc, icon)
@@ -336,7 +335,6 @@ class MainWindow(QTabWidget):
         self.dashboard_metric_cards["pantry"].setText(str(len(self.ingredients)))
         self.dashboard_metric_cards["expiring"].setText(str(len(expiring)))
         self.dashboard_metric_cards["shopping"].setText(str(pending_shop))
-        self.dashboard_metric_cards["recipe"].setText(str(len(self.recipes)))
 
         if expiring:
             lines = []

@@ -16,11 +16,12 @@ from typing import Callable, List, Dict
 import requests
 from bs4 import BeautifulSoup
 
+from app_paths import BASE_DIR
 from utils.logger import get_logger
 
 logger = get_logger("spider")
 
-DATA_JSON = Path(__file__).resolve().parent / "data.json"
+DATA_JSON = BASE_DIR / "data.json"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -114,7 +115,7 @@ def _load_existing() -> List[Dict]:
         return []
 
 
-TRAIN_JSONL = Path(__file__).resolve().parent / "data_train.jsonl"
+TRAIN_JSONL = BASE_DIR / "data_train.jsonl"
 
 
 def _save(records: List[Dict]) -> None:
